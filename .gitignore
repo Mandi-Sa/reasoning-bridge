@@ -1,0 +1,17 @@
+node_modules/
+dist/
+data/
+release/
+linux-deploy/
+
+config.json
+.env
+.env.*
+
+*.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+.DS_Store
+Thumbs.db

@@ -1,0 +1,23 @@
+{
+  "name": "reasoning-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/server.ts",
+    "migrate:redis-to-sqlite": "npm run build && node dist/migrate-redis-to-sqlite.js",
+    "migrate:sqlite-to-redis": "npm run build && node dist/migrate-sqlite-to-redis.js",
+    "start": "node dist/server.js",
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "fastify": "^5.3.3",
+    "redis": "^5.8.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.1",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}
