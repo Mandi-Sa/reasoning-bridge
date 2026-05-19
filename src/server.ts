@@ -408,7 +408,9 @@ function shouldAttachRequestContextToSession(
 function shouldIsolateMismatchedInferredSession(
   body: ChatCompletionRequest,
   resolvedBy: "explicit" | "bootstrap" | "context-key" | "recent-fallback" | "cross-namespace-fallback" | "created",
-  matchCount: number
+  matchCount: number,
+  repairedCount: number,
+  missingCount: number
 ): boolean {
   if (resolvedBy === "explicit" || resolvedBy === "created") {
     return false;
@@ -416,7 +418,10 @@ function shouldIsolateMismatchedInferredSession(
   if (!isRecentFallbackEligible(body)) {
     return false;
   }
-  return matchCount === 0;
+  if (matchCount === 0) {
+    return true;
+  }
+  return repairedCount === 0 && missingCount > 0;
 }
 
 function isConfidentSessionCandidate(candidate: SessionMatchCandidate | undefined): boolean {
@@ -782,7 +787,13 @@ async function start(): Promise<void> {
       }
 
       if (
-        shouldIsolateMismatchedInferredSession(workingBody, resolvedBy, previewRepairResult.matches.length)
+        shouldIsolateMismatchedInferredSession(
+          workingBody,
+          resolvedBy,
+          previewRepairResult.matches.length,
+          previewRepairResult.repairedAssistantIndexes.length,
+          previewRepairResult.missingAssistantIndexes.length
+        )
       ) {
         const recentSessions = (await store.listRecent(config.recentFallbackLimit))
           .filter((item) =>
@@ -811,7 +822,15 @@ async function start(): Promise<void> {
         }
       }
 
-      if (shouldIsolateMismatchedInferredSession(workingBody, resolvedBy, previewRepairResult.matches.length)) {
+      if (
+        shouldIsolateMismatchedInferredSession(
+          workingBody,
+          resolvedBy,
+          previewRepairResult.matches.length,
+          previewRepairResult.repairedAssistantIndexes.length,
+          previewRepairResult.missingAssistantIndexes.length
+        )
+      ) {
         request.log.warn({
           sessionKey: resolvedSession.sessionKey,
           source: resolvedBy,
