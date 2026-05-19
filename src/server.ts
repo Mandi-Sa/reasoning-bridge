@@ -362,12 +362,18 @@ function isRecentFallbackEligible(body: ChatCompletionRequest): boolean {
 }
 
 function canDisableThinking(body: ChatCompletionRequest): boolean {
-  return typeof body.reasoning_effort === "string";
+  return typeof body.reasoning_effort === "string" || config.forceInjectReasoningEffortNone;
 }
 
 function disableThinkingMode(body: ChatCompletionRequest): ChatCompletionRequest {
   const nextBody = { ...body };
-  delete nextBody.reasoning_effort;
+  if (typeof body.reasoning_effort === "string") {
+    delete nextBody.reasoning_effort;
+    return nextBody;
+  }
+  if (config.forceInjectReasoningEffortNone) {
+    nextBody.reasoning_effort = "none";
+  }
   return nextBody;
 }
 

@@ -81,7 +81,10 @@ npm start
   "logBody": false,
   "recentFallbackLimit": 32,
   "recentFallbackMinScore": 2,
+  "sessionMatchMinScore": 6,
+  "sessionMatchMinMargin": 3,
   "lowConfidenceStrategy": "disable-thinking",
+  "forceInjectReasoningEffortNone": true,
   "sessionStoreDriver": "sqlite",
   "sessionStoreFilePath": "./data/sessions.sqlite",
   "redisUrl": "redis://127.0.0.1:6379/12",
@@ -104,7 +107,10 @@ npm start
 - `logBody`：是否打印请求体日志
 - `recentFallbackLimit`：最近会话回退搜索数量
 - `recentFallbackMinScore`：最近会话回退的最小匹配分数
+- `sessionMatchMinScore`：桥接器接受推断会话前要求达到的最小匹配分数
+- `sessionMatchMinMargin`：多个候选会话竞争时，第一名相对第二名至少要领先的分数
 - `lowConfidenceStrategy`：可选 `warn`、`disable-thinking`、`reject`
+- `forceInjectReasoningEffortNone`：默认为 `true`。当推理修复失败且客户端请求本身没有显式思考开关时，桥接器会主动注入 `reasoning_effort: "none"` 再转发
 - `sessionStoreDriver`：可选 `memory`、`sqlite`、`redis`
 - `sessionStoreFilePath`：SQLite 文件路径
 - `redisUrl`：Redis 连接地址，可包含 DB 库编号

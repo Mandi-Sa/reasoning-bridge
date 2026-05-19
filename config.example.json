@@ -12,6 +12,7 @@
   "sessionMatchMinScore": 6,
   "sessionMatchMinMargin": 3,
   "lowConfidenceStrategy": "disable-thinking",
+  "forceInjectReasoningEffortNone": true,
   "allowUserScopedSessions": false,
   "sessionStoreDriver": "sqlite",
   "sessionStoreFilePath": "./data/sessions.sqlite",

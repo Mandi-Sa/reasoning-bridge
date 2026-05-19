@@ -84,6 +84,7 @@ Example `config.example.json`:
   "sessionMatchMinScore": 6,
   "sessionMatchMinMargin": 3,
   "lowConfidenceStrategy": "disable-thinking",
+  "forceInjectReasoningEffortNone": true,
   "allowUserScopedSessions": false,
   "sessionStoreDriver": "sqlite",
   "sessionStoreFilePath": "./data/sessions.sqlite",
@@ -110,6 +111,7 @@ Key fields:
 - `sessionMatchMinScore`: minimum score required before the bridge trusts an inferred session
 - `sessionMatchMinMargin`: minimum lead over the runner-up candidate when multiple sessions compete
 - `lowConfidenceStrategy`: `warn`, `disable-thinking`, or `reject`
+- `forceInjectReasoningEffortNone`: when `true`, the bridge injects `reasoning_effort: "none"` by default if reasoning repair fails and the incoming request did not expose an explicit toggle
 - `allowUserScopedSessions`: when `true`, the bridge may use the request `user` field as an explicit session key. Keep this `false` unless your callers guarantee stable, unique `user` values.
 - `sessionStoreDriver`: `memory`, `sqlite`, or `redis`
 - `sessionStoreFilePath`: SQLite file path
