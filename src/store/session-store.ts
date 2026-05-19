@@ -35,6 +35,18 @@ interface SessionStoreOptions {
   limits: SessionStoreLimits;
 }
 
+function summarizeSessions(sessions: SessionRecord[]): Pick<StoreStatsSnapshot, "inflightCount" | "totalTurns" | "sessionsWithBootstrapKey"> {
+  return sessions.reduce((totals, session) => ({
+    inflightCount: totals.inflightCount + session.inflightRequests.length,
+    totalTurns: totals.totalTurns + session.turns.length,
+    sessionsWithBootstrapKey: totals.sessionsWithBootstrapKey + (session.bootstrapKey ? 1 : 0)
+  }), {
+    inflightCount: 0,
+    totalTurns: 0,
+    sessionsWithBootstrapKey: 0
+  });
+}
+
 export class InMemorySessionStore implements SessionStore {
   private readonly sessions = new Map<string, SessionRecord>();
   private readonly anchorIndex = new Map<string, Set<string>>();
@@ -160,13 +172,14 @@ export class InMemorySessionStore implements SessionStore {
 
   async getStats(limit = 10): Promise<StoreStatsSnapshot> {
     const sessions = [...this.sessions.values()].sort((left, right) => right.updatedAt - left.updatedAt);
+    const totals = summarizeSessions(sessions);
     return {
       driver: "memory",
       sessionCount: sessions.length,
       estimatedBytes: Buffer.byteLength(JSON.stringify(sessions), "utf8"),
-      inflightCount: sessions.reduce((total, session) => total + session.inflightRequests.length, 0),
-      totalTurns: sessions.reduce((total, session) => total + session.turns.length, 0),
-      sessionsWithBootstrapKey: sessions.filter((session) => Boolean(session.bootstrapKey)).length,
+      inflightCount: totals.inflightCount,
+      totalTurns: totals.totalTurns,
+      sessionsWithBootstrapKey: totals.sessionsWithBootstrapKey,
       recentSessionKeys: sessions.slice(0, limit).map((session) => session.sessionKey),
       limits: {
         maxSessions: this.limits.maxSessions,
@@ -389,38 +402,27 @@ export class SqliteSessionStore implements SessionStore {
 
   async getStats(limit = 10): Promise<StoreStatsSnapshot> {
     const countRow = this.db.prepare("SELECT COUNT(*) AS count FROM sessions").get() as { count: number };
-    const turnsRow = this.db.prepare(`
+    const payloadRows = this.db.prepare(`
       SELECT payload
       FROM sessions
-      ORDER BY updated_at DESC
-      LIMIT ?
-    `).all(Math.max(limit, 1000)) as Array<{ payload: string }>;
-    const recentRows = this.db.prepare(`
+    `).all() as Array<{ payload: string }>;
+    const sessions = payloadRows.map((row) => JSON.parse(row.payload) as SessionRecord);
+    const totals = summarizeSessions(sessions);
+    const keyRows = this.db.prepare(`
       SELECT session_key
       FROM sessions
       ORDER BY updated_at DESC
       LIMIT ?
     `).all(limit) as Array<{ session_key: string }>;
-    const bootstrapRow = this.db.prepare(`
-      SELECT COUNT(*) AS count
-      FROM sessions
-      WHERE bootstrap_key IS NOT NULL AND bootstrap_key != ''
-    `).get() as { count: number };
-    const inflightCount = turnsRow
-      .map((row) => JSON.parse(row.payload) as SessionRecord)
-      .reduce((total, session) => total + session.inflightRequests.length, 0);
-    const totalTurns = turnsRow
-      .map((row) => JSON.parse(row.payload) as SessionRecord)
-      .reduce((total, session) => total + session.turns.length, 0);
 
     return {
       driver: "sqlite",
       sessionCount: countRow.count,
       estimatedBytes: this.safeFileSize(this.filePath),
-      inflightCount,
-      totalTurns,
-      sessionsWithBootstrapKey: bootstrapRow.count,
-      recentSessionKeys: recentRows.map((row) => row.session_key),
+      inflightCount: totals.inflightCount,
+      totalTurns: totals.totalTurns,
+      sessionsWithBootstrapKey: totals.sessionsWithBootstrapKey,
+      recentSessionKeys: keyRows.map((row) => row.session_key),
       limits: {
         maxSessions: this.limits.maxSessions,
         maxTurnsPerSession: this.limits.maxTurnsPerSession,
@@ -666,7 +668,9 @@ export class RedisSessionStore implements SessionStore {
     await this.ready;
     const sessionCount = await this.client.zCard(this.lruKey());
     const recentSessionKeys = (await this.client.zRange(this.lruKey(), -limit, -1)).reverse();
-    const recentSessions = await this.loadSessions(recentSessionKeys);
+    const allSessionKeys = await this.client.zRange(this.lruKey(), 0, -1);
+    const sessions = await this.loadSessions(allSessionKeys);
+    const totals = summarizeSessions(sessions);
     const usedMemory = await this.estimateOwnedBytes();
     const bootstrapKeyCount = await this.client.keys(`${this.prefix}:bootstrap:*`);
     const anchorKeyCount = await this.client.keys(`${this.prefix}:anchor:*`);
@@ -675,9 +679,9 @@ export class RedisSessionStore implements SessionStore {
       driver: "redis",
       sessionCount,
       estimatedBytes: usedMemory,
-      inflightCount: recentSessions.reduce((total, session) => total + session.inflightRequests.length, 0),
-      totalTurns: recentSessions.reduce((total, session) => total + session.turns.length, 0),
-      sessionsWithBootstrapKey: bootstrapKeyCount.length,
+      inflightCount: totals.inflightCount,
+      totalTurns: totals.totalTurns,
+      sessionsWithBootstrapKey: totals.sessionsWithBootstrapKey,
       recentSessionKeys,
       limits: {
         maxSessions: this.limits.maxSessions,
