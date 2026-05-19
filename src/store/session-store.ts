@@ -595,16 +595,22 @@ export class SqliteSessionStore implements SessionStore {
 
 export class RedisSessionStore implements SessionStore {
   private readonly client: RedisClientType;
+  private readonly txClient: RedisClientType;
   private readonly prefix: string;
   private readonly limits: SessionStoreLimits;
   private readonly ready: Promise<void>;
   private readonly locks = new SessionMutationLocks();
+  private readonly mutationLock = new SessionMutationLocks();
 
   constructor(redisUrl: string, keyPrefix: string, limits: SessionStoreLimits) {
     this.client = createClient({ url: redisUrl });
+    this.txClient = this.client.duplicate();
     this.prefix = keyPrefix;
     this.limits = limits;
-    this.ready = this.client.connect().then(() => undefined);
+    this.ready = Promise.all([
+      this.client.connect(),
+      this.txClient.connect()
+    ]).then(() => undefined);
   }
 
   async get(sessionKey: string): Promise<SessionRecord | undefined> {
@@ -723,12 +729,15 @@ export class RedisSessionStore implements SessionStore {
 
   async cleanup(): Promise<void> {
     await this.ready;
-    await this.pruneToLimits();
+    await this.withMutationLock(() => this.pruneToLimitsLocked());
   }
 
   async close(): Promise<void> {
     await this.ready;
-    await this.client.quit();
+    await Promise.all([
+      this.client.quit(),
+      this.txClient.quit()
+    ]);
   }
 
   async exportAllSessions(): Promise<SessionRecord[]> {
@@ -778,31 +787,49 @@ export class RedisSessionStore implements SessionStore {
       inflightRequests: session.inflightRequests.slice(0, 64)
     };
 
-    const oldSession = await this.get(normalized.sessionKey);
-    const pipeline = this.client.multi();
-    pipeline.set(this.sessionKey(normalized.sessionKey), JSON.stringify(normalized));
-    pipeline.zAdd(this.lruKey(), { score: normalized.updatedAt, value: normalized.sessionKey });
+    await this.withMutationLock(async () => {
+      const storageKey = this.sessionKey(normalized.sessionKey);
 
-    if (oldSession?.bootstrapKey && oldSession.bootstrapKey !== normalized.bootstrapKey) {
-      pipeline.sRem(this.bootstrapSetKey(oldSession.bootstrapKey), normalized.sessionKey);
-    }
-    if (normalized.bootstrapKey) {
-      pipeline.sAdd(this.bootstrapSetKey(normalized.bootstrapKey), normalized.sessionKey);
-    }
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        await this.txClient.watch(storageKey);
+        try {
+          const oldSession = await this.readSession(this.txClient, normalized.sessionKey);
+          const pipeline = this.txClient.multi();
+          pipeline.set(storageKey, JSON.stringify(normalized));
+          pipeline.zAdd(this.lruKey(), { score: normalized.updatedAt, value: normalized.sessionKey });
 
-    const oldContextKeys = new Set(oldSession?.contextKeys ?? []);
-    const newContextKeys = new Set(normalized.contextKeys);
-    for (const contextKey of oldContextKeys) {
-      if (!newContextKeys.has(contextKey)) {
-        pipeline.sRem(this.anchorSetKey(contextKey), normalized.sessionKey);
+          if (oldSession?.bootstrapKey && oldSession.bootstrapKey !== normalized.bootstrapKey) {
+            pipeline.sRem(this.bootstrapSetKey(oldSession.bootstrapKey), normalized.sessionKey);
+          }
+          if (normalized.bootstrapKey) {
+            pipeline.sAdd(this.bootstrapSetKey(normalized.bootstrapKey), normalized.sessionKey);
+          }
+
+          const oldContextKeys = new Set(oldSession?.contextKeys ?? []);
+          const newContextKeys = new Set(normalized.contextKeys);
+          for (const contextKey of oldContextKeys) {
+            if (!newContextKeys.has(contextKey)) {
+              pipeline.sRem(this.anchorSetKey(contextKey), normalized.sessionKey);
+            }
+          }
+          for (const contextKey of newContextKeys) {
+            pipeline.sAdd(this.anchorSetKey(contextKey), normalized.sessionKey);
+          }
+
+          await pipeline.exec();
+          await this.pruneToLimitsLocked();
+          return;
+        } catch (error) {
+          await this.safeUnwatch();
+          if (this.isWatchError(error)) {
+            continue;
+          }
+          throw error;
+        }
       }
-    }
-    for (const contextKey of newContextKeys) {
-      pipeline.sAdd(this.anchorSetKey(contextKey), normalized.sessionKey);
-    }
 
-    await pipeline.exec();
-    await this.pruneToLimits();
+      throw new Error(`failed to persist Redis session after concurrent modification: ${normalized.sessionKey}`);
+    });
   }
 
   private async loadSessions(sessionKeys: string[]): Promise<SessionRecord[]> {
@@ -816,25 +843,25 @@ export class RedisSessionStore implements SessionStore {
       .sort((left, right) => right.updatedAt - left.updatedAt);
   }
 
-  private async pruneToLimits(): Promise<void> {
-    const sessionCount = await this.client.zCard(this.lruKey());
+  private async pruneToLimitsLocked(): Promise<void> {
+    const sessionCount = await this.txClient.zCard(this.lruKey());
     const overflow = Math.max(0, sessionCount - this.limits.maxSessions);
     if (overflow > 0) {
-      const victims = await this.client.zRange(this.lruKey(), 0, overflow - 1);
+      const victims = await this.txClient.zRange(this.lruKey(), 0, overflow - 1);
       for (const victim of victims) {
-        await this.deleteSession(victim);
+        await this.deleteSessionLocked(victim);
       }
     }
 
     let usedMemory = await this.estimateOwnedBytes();
     if (usedMemory > this.limits.maxStoreBytes) {
       while (true) {
-        const nextVictim = await this.client.zRange(this.lruKey(), 0, 0);
+        const nextVictim = await this.txClient.zRange(this.lruKey(), 0, 0);
         const victim = nextVictim[0];
         if (!victim) {
           break;
         }
-        await this.deleteSession(victim);
+        await this.deleteSessionLocked(victim);
         usedMemory = await this.estimateOwnedBytes();
         if (usedMemory <= this.limits.maxStoreBytes) {
           break;
@@ -843,18 +870,55 @@ export class RedisSessionStore implements SessionStore {
     }
   }
 
-  private async deleteSession(sessionKey: string): Promise<void> {
-    const session = await this.get(sessionKey);
-    const pipeline = this.client.multi();
-    pipeline.del(this.sessionKey(sessionKey));
-    pipeline.zRem(this.lruKey(), sessionKey);
-    if (session?.bootstrapKey) {
-      pipeline.sRem(this.bootstrapSetKey(session.bootstrapKey), sessionKey);
+  private async deleteSessionLocked(sessionKey: string): Promise<void> {
+    const storageKey = this.sessionKey(sessionKey);
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await this.txClient.watch(storageKey);
+      try {
+        const session = await this.readSession(this.txClient, sessionKey);
+        const pipeline = this.txClient.multi();
+        pipeline.del(storageKey);
+        pipeline.zRem(this.lruKey(), sessionKey);
+        if (session?.bootstrapKey) {
+          pipeline.sRem(this.bootstrapSetKey(session.bootstrapKey), sessionKey);
+        }
+        for (const contextKey of session?.contextKeys ?? []) {
+          pipeline.sRem(this.anchorSetKey(contextKey), sessionKey);
+        }
+        await pipeline.exec();
+        return;
+      } catch (error) {
+        await this.safeUnwatch();
+        if (this.isWatchError(error)) {
+          continue;
+        }
+        throw error;
+      }
     }
-    for (const contextKey of session?.contextKeys ?? []) {
-      pipeline.sRem(this.anchorSetKey(contextKey), sessionKey);
+
+    throw new Error(`failed to delete Redis session after concurrent modification: ${sessionKey}`);
+  }
+
+  private async readSession(client: RedisClientType, sessionKey: string): Promise<SessionRecord | undefined> {
+    const value = await client.get(this.sessionKey(sessionKey));
+    return value ? JSON.parse(value) as SessionRecord : undefined;
+  }
+
+  private async withMutationLock<T>(action: () => Promise<T>): Promise<T> {
+    return this.mutationLock.run("__redis-store-mutation__", action);
+  }
+
+  private async safeUnwatch(): Promise<void> {
+    try {
+      await this.txClient.unwatch();
+    } catch {
+      // Ignore cleanup failures after aborted WATCH transactions.
     }
-    await pipeline.exec();
+  }
+
+  private isWatchError(error: unknown): boolean {
+    return error instanceof Error && error.name === "WatchError";
   }
 
   private sessionKey(sessionKey: string): string {
