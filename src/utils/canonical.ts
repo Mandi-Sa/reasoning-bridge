@@ -34,6 +34,23 @@ export function normalizeText(value: JsonValue | undefined): string {
   return "";
 }
 
+function normalizeToolCallArguments(argumentsText: string | undefined): string | null {
+  if (typeof argumentsText !== "string") {
+    return null;
+  }
+
+  const trimmed = argumentsText.trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  try {
+    return canonicalJson(JSON.parse(trimmed) as JsonValue);
+  } catch {
+    return trimmed;
+  }
+}
+
 export function normalizeToolCalls(toolCalls: ToolCall[] | undefined, keepIds: boolean): JsonValue[] {
   if (!toolCalls?.length) {
     return [];
@@ -44,7 +61,7 @@ export function normalizeToolCalls(toolCalls: ToolCall[] | undefined, keepIds: b
     id: keepIds ? toolCall.id ?? null : null,
     function: {
       name: toolCall.function?.name ?? null,
-      arguments: toolCall.function?.arguments ?? null
+      arguments: normalizeToolCallArguments(toolCall.function?.arguments)
     }
   }));
 }

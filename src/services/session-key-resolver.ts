@@ -2,6 +2,7 @@ import type { ChatCompletionRequest, ChatMessage, SessionMatchCandidate, Session
 import { canonicalJson, normalizeText } from "../utils/canonical.js";
 import { sha256 } from "../utils/hash.js";
 import { buildMessageFingerprint } from "./fingerprint.js";
+import { getStoredTurnFingerprint } from "./stored-turn-fingerprint.js";
 
 export interface SessionResolutionInput {
   body: ChatCompletionRequest;
@@ -228,18 +229,19 @@ function scoreSession(body: ChatCompletionRequest, session: SessionRecord): Sess
     if (!incoming || !stored) {
       continue;
     }
+    const storedFingerprint = getStoredTurnFingerprint(stored);
 
-    if (stored.fingerprint.strict === incoming.fingerprint.strict) {
+    if (storedFingerprint.strict === incoming.fingerprint.strict) {
       score += 8;
       matchedTurns += 1;
       continue;
     }
-    if (stored.fingerprint.loose === incoming.fingerprint.loose) {
+    if (storedFingerprint.loose === incoming.fingerprint.loose) {
       score += 6;
       matchedTurns += 1;
       continue;
     }
-    if (stored.fingerprint.contentOnly === incoming.fingerprint.contentOnly) {
+    if (storedFingerprint.contentOnly === incoming.fingerprint.contentOnly) {
       score += hasSameToolShape(incoming.message, stored.message as ChatMessage) ? 4 : 3;
       matchedTurns += 1;
       continue;

@@ -53,10 +53,6 @@ async function ensureSession(
   const existing = await store.get(sessionKey);
   if (existing) {
     await store.touch(sessionKey);
-    if (bootstrapKey) {
-      await store.setBootstrapKey(sessionKey, bootstrapKey);
-    }
-    await store.addContextKey(sessionKey, anchorKey);
     return existing;
   }
 
@@ -386,6 +382,35 @@ function countEligibleAssistantMessages(messages: ChatMessage[]): number {
   return getMissingReasoningAssistantIndexes(messages).length;
 }
 
+function shouldAttachRequestContextToSession(
+  resolvedBy: "explicit" | "bootstrap" | "context-key" | "recent-fallback" | "created",
+  resolvedAnchorKey: string,
+  currentAnchorKey: string,
+  repairedMatchCount: number
+): boolean {
+  if (resolvedBy === "explicit" || resolvedBy === "created") {
+    return true;
+  }
+  if (resolvedAnchorKey === currentAnchorKey) {
+    return true;
+  }
+  return repairedMatchCount > 0;
+}
+
+function shouldIsolateMismatchedInferredSession(
+  body: ChatCompletionRequest,
+  resolvedBy: "explicit" | "bootstrap" | "context-key" | "recent-fallback" | "created",
+  matchCount: number
+): boolean {
+  if (resolvedBy === "explicit" || resolvedBy === "created") {
+    return false;
+  }
+  if (!isRecentFallbackEligible(body)) {
+    return false;
+  }
+  return matchCount === 0;
+}
+
 function isConfidentSessionCandidate(candidate: SessionMatchCandidate | undefined): boolean {
   if (!candidate) {
     return false;
@@ -675,6 +700,58 @@ async function start(): Promise<void> {
         };
         resolvedBy = "created";
       }
+      const resolvedSession = resolved;
+
+      let session = resolvedBy === "created" ? undefined : await store.get(resolvedSession.sessionKey);
+      let previewRepairResult = repairMessages(workingBody.messages, session);
+
+      if (
+        shouldIsolateMismatchedInferredSession(workingBody, resolvedBy, previewRepairResult.matches.length)
+      ) {
+        const recentSessions = (await store.listRecent(config.recentFallbackLimit))
+          .filter((item) =>
+            item.sessionKey.startsWith(`${downstreamNamespace.namespaceKey}:`) &&
+            item.sessionKey !== resolvedSession.sessionKey
+          );
+        const recentFallback = findBestSessionCandidate(
+          { body: workingBody, headers: request.headers },
+          recentSessions,
+          "recent-fallback"
+        );
+        if (recentFallback && isConfidentSessionCandidate(recentFallback)) {
+          const recentSession = await store.get(recentFallback.sessionKey);
+          const recentRepairResult = repairMessages(workingBody.messages, recentSession);
+          if (recentRepairResult.matches.length > previewRepairResult.matches.length) {
+            resolved = {
+              sessionKey: recentFallback.sessionKey,
+              anchorKey: recentFallback.anchorKey,
+              source: recentFallback.source
+            };
+            resolvedBy = recentFallback.source;
+            bestCandidate = recentFallback;
+            session = recentSession;
+            previewRepairResult = recentRepairResult;
+          }
+        }
+      }
+
+      if (shouldIsolateMismatchedInferredSession(workingBody, resolvedBy, previewRepairResult.matches.length)) {
+        request.log.warn({
+          sessionKey: resolvedSession.sessionKey,
+          source: resolvedBy,
+          anchorKey,
+          bootstrapKey: bootstrapKey ?? null
+        }, "inferred session produced no repair matches; creating isolated session");
+        const isolatedResolved = {
+          sessionKey: `${anchorKey}:root`,
+          anchorKey,
+          source: "context-key"
+        } satisfies typeof resolvedSession;
+        resolved = isolatedResolved;
+        resolvedBy = "created";
+        session = undefined;
+        previewRepairResult = repairMessages(workingBody.messages, undefined);
+      }
 
       const maybeAdjustedBody = handleLowConfidence(reply, workingBody, resolvedBy, bestCandidate);
       if (!maybeAdjustedBody) {
@@ -692,13 +769,22 @@ async function start(): Promise<void> {
       workingBody = maybeAdjustedBody;
       metrics.recordResolution(resolvedBy);
 
-      const session = await ensureSession(resolved.sessionKey, resolved.anchorKey, bootstrapKey, body.model, store);
-      await store.addContextKey(session.sessionKey, anchorKey);
-      if (bootstrapKey) {
+      const shouldAttachRequestContext = shouldAttachRequestContextToSession(
+        resolvedBy,
+        resolved.anchorKey,
+        anchorKey,
+        previewRepairResult.matches.length
+      );
+
+      session = await ensureSession(resolved.sessionKey, resolved.anchorKey, bootstrapKey, body.model, store);
+      if (shouldAttachRequestContext && resolvedBy !== "created") {
+        await store.addContextKey(session.sessionKey, anchorKey);
+      }
+      if (shouldAttachRequestContext && bootstrapKey && resolvedBy !== "created") {
         await store.setBootstrapKey(session.sessionKey, bootstrapKey);
       }
 
-      const repairResult = repairMessages(workingBody.messages, session);
+      const repairResult = previewRepairResult;
       let repairedBody: ChatCompletionRequest = {
         ...workingBody,
         messages: repairResult.repairedMessages

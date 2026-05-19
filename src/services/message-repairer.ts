@@ -1,6 +1,7 @@
 import type { AssistantTurn, ChatMessage, RepairMatch, RepairResult, SessionRecord } from "../types.js";
 import { normalizeText } from "../utils/canonical.js";
 import { buildMessageFingerprint } from "./fingerprint.js";
+import { getStoredTurnFingerprint } from "./stored-turn-fingerprint.js";
 
 interface IncomingAssistantMessage {
   assistantOrder: number;
@@ -99,10 +100,11 @@ function matchFingerprintCandidates(
       if (!turn || usedTurnIds.has(turn.turnId)) {
         continue;
       }
+      const storedFingerprint = getStoredTurnFingerprint(turn);
 
       const matched = mode === "strict"
-        ? turn.fingerprint.strict === item.fingerprint.strict
-        : turn.fingerprint.loose === item.fingerprint.loose;
+        ? storedFingerprint.strict === item.fingerprint.strict
+        : storedFingerprint.loose === item.fingerprint.loose;
       if (!matched) {
         continue;
       }
@@ -141,7 +143,8 @@ function matchContentOnlyCandidates(
       if (!turn || usedTurnIds.has(turn.turnId)) {
         continue;
       }
-      if (turn.fingerprint.contentOnly !== item.fingerprint.contentOnly) {
+      const storedFingerprint = getStoredTurnFingerprint(turn);
+      if (storedFingerprint.contentOnly !== item.fingerprint.contentOnly) {
         continue;
       }
       if (!hasSameToolShape(item.message, turn.message as ChatMessage)) {
