@@ -61,6 +61,10 @@ export function createStreamAssemblerState(): StreamAssemblerState {
   };
 }
 
+export function isStreamAssemblyComplete(state: StreamAssemblerState): boolean {
+  return state.done || typeof state.finishReason === "string";
+}
+
 export function consumeSseEvent(state: StreamAssemblerState, data: string): void {
   if (!data || data === "[DONE]") {
     state.done = true;
@@ -126,6 +130,9 @@ export function consumeSseEvent(state: StreamAssemblerState, data: string): void
 }
 
 export function finalizeStreamAssistantMessage(state: StreamAssemblerState): AssistantMessageSnapshot | undefined {
+  if (!isStreamAssemblyComplete(state)) {
+    return undefined;
+  }
   if (!state.contentParts.length && !state.toolCalls.size && !state.reasoningParts.length) {
     return undefined;
   }

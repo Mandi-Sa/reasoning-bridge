@@ -9,7 +9,8 @@ import {
   consumeSseEvent,
   createStreamAssemblerState,
   extractAssistantMessageFromCompletion,
-  finalizeStreamAssistantMessage
+  finalizeStreamAssistantMessage,
+  isStreamAssemblyComplete
 } from "./services/reasoning-extractor.js";
 import {
   buildAnchorKey,
@@ -791,11 +792,20 @@ async function start(): Promise<void> {
         try {
           await proxyStream(reply, upstream, (data) => consumeSseEvent(assembler, data));
           cleanupUpstream();
+          const streamComplete = isStreamAssemblyComplete(assembler);
+          if (!streamComplete) {
+            request.log.warn({
+              sessionKey: session.sessionKey,
+              requestHash,
+              responseId: assembler.responseId
+            }, "stream ended without terminal event");
+            metrics.recordStreamInterruption();
+          }
           const assistantMessage = finalizeStreamAssistantMessage(assembler);
           if (assistantMessage) {
             await saveAssistantTurn(session.sessionKey, requestHash, assembler.responseId, repairedBody.messages, assistantMessage, store);
           }
-          outcome = "success";
+          outcome = streamComplete ? "success" : "failure";
         } catch (error) {
           cleanupUpstream();
           request.log.error({ err: error }, "stream proxy failed");
