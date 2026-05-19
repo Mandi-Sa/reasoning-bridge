@@ -385,29 +385,47 @@ function countEligibleAssistantMessages(messages: ChatMessage[]): number {
   return getMissingReasoningAssistantIndexes(messages).length;
 }
 
+function isConfidentSessionCandidate(candidate: SessionMatchCandidate | undefined): boolean {
+  if (!candidate) {
+    return false;
+  }
+  if (candidate.matchedTurns <= 0) {
+    return false;
+  }
+  if (candidate.score < config.sessionMatchMinScore) {
+    return false;
+  }
+  if (candidate.candidateCount > 1 && candidate.scoreGap < config.sessionMatchMinMargin) {
+    return false;
+  }
+  return true;
+}
+
+function buildLowConfidenceWarning(
+  candidate: SessionMatchCandidate | undefined,
+  resolvedBy: "explicit" | "bootstrap" | "context-key" | "recent-fallback" | "created"
+): string {
+  if (!candidate) {
+    return `low-confidence-session-match:source=${resolvedBy},score=0,gap=0,matched=0`;
+  }
+  return `low-confidence-session-match:source=${candidate.source},score=${candidate.score},gap=${candidate.scoreGap},matched=${candidate.matchedTurns}`;
+}
+
 function handleLowConfidence(
   reply: FastifyReply,
   body: ChatCompletionRequest,
+  resolvedBy: "explicit" | "bootstrap" | "context-key" | "recent-fallback" | "created",
   bestCandidate: SessionMatchCandidate | undefined
 ): ChatCompletionRequest | undefined {
-  if (!isRecentFallbackEligible(body)) {
+  if (resolvedBy === "explicit" || !isRecentFallbackEligible(body)) {
     return body;
   }
 
-  if (
-    bestCandidate &&
-    (bestCandidate.source === "bootstrap" || bestCandidate.source === "context-key") &&
-    (bestCandidate.candidateCount === 1 || bestCandidate.score > 0)
-  ) {
+  if (isConfidentSessionCandidate(bestCandidate)) {
     return body;
   }
 
-  const score = bestCandidate?.score ?? 0;
-  if (score >= config.recentFallbackMinScore) {
-    return body;
-  }
-
-  appendWarning(reply, `low-confidence-session-match:score=${score}`);
+  appendWarning(reply, buildLowConfidenceWarning(bestCandidate, resolvedBy));
 
   if (config.lowConfidenceStrategy === "reject") {
     reply.code(409).send({
@@ -503,7 +521,10 @@ async function start(): Promise<void> {
         sessionStoreDriver: config.sessionStoreDriver,
         recentFallbackLimit: config.recentFallbackLimit,
         recentFallbackMinScore: config.recentFallbackMinScore,
+        sessionMatchMinScore: config.sessionMatchMinScore,
+        sessionMatchMinMargin: config.sessionMatchMinMargin,
         lowConfidenceStrategy: config.lowConfidenceStrategy,
+        allowUserScopedSessions: config.allowUserScopedSessions,
         maxSessions: config.maxSessions,
         maxTurnsPerSession: config.maxTurnsPerSession,
         maxStoreBytes: config.maxStoreBytes
@@ -561,30 +582,38 @@ async function start(): Promise<void> {
       const rawBootstrapKey = buildBootstrapKey(workingBody);
       const anchorKey = qualifyKey(downstreamNamespace.namespaceKey, rawAnchorKey);
       const bootstrapKey = rawBootstrapKey ? qualifyKey(downstreamNamespace.namespaceKey, rawBootstrapKey) : undefined;
-      const contextSessions = await store.listByAnchor(anchorKey);
-      const bootstrapSessions = bootstrapKey ? await store.listByBootstrapKey(bootstrapKey) : [];
-
-      const explicit = resolveExplicitSessionKey({ body: workingBody, headers: request.headers });
+      const explicit = resolveExplicitSessionKey(
+        { body: workingBody, headers: request.headers },
+        { allowUserScopedSessions: config.allowUserScopedSessions }
+      );
       let resolved = explicit ? {
         ...explicit,
         sessionKey: qualifyKey(downstreamNamespace.namespaceKey, explicit.sessionKey),
         anchorKey: qualifyKey(downstreamNamespace.namespaceKey, explicit.anchorKey)
       } : undefined;
       let resolvedBy: "explicit" | "bootstrap" | "context-key" | "recent-fallback" | "created" = explicit ? "explicit" : "created";
+      let contextSessions: SessionRecord[] = [];
+      let bootstrapSessions: SessionRecord[] = [];
+      let bestCandidate: SessionMatchCandidate | undefined;
 
-      let bestCandidate =
-        findBestSessionCandidate(
-          { body: workingBody, headers: request.headers },
-          bootstrapSessions,
-          "bootstrap",
-          true
-        ) ??
-        findBestSessionCandidate(
-          { body: workingBody, headers: request.headers },
-          contextSessions,
-          "context-key",
-          true
-        );
+      if (!resolved) {
+        contextSessions = await store.listByAnchor(anchorKey);
+        bootstrapSessions = bootstrapKey ? await store.listByBootstrapKey(bootstrapKey) : [];
+
+        bestCandidate =
+          findBestSessionCandidate(
+            { body: workingBody, headers: request.headers },
+            bootstrapSessions,
+            "bootstrap",
+            true
+          ) ??
+          findBestSessionCandidate(
+            { body: workingBody, headers: request.headers },
+            contextSessions,
+            "context-key",
+            true
+          );
+      }
 
       if (!resolved && bestCandidate) {
         resolved = {
@@ -606,12 +635,14 @@ async function start(): Promise<void> {
         );
         if (recentFallback) {
           bestCandidate = recentFallback;
-          resolved = {
-            sessionKey: recentFallback.sessionKey,
-            anchorKey: recentFallback.anchorKey,
-            source: recentFallback.source
-          };
-          resolvedBy = recentFallback.source;
+          if (recentFallback.score >= config.recentFallbackMinScore) {
+            resolved = {
+              sessionKey: recentFallback.sessionKey,
+              anchorKey: recentFallback.anchorKey,
+              source: recentFallback.source
+            };
+            resolvedBy = recentFallback.source;
+          }
         }
       }
 
@@ -624,7 +655,7 @@ async function start(): Promise<void> {
         resolvedBy = "created";
       }
 
-      const maybeAdjustedBody = handleLowConfidence(reply, workingBody, bestCandidate);
+      const maybeAdjustedBody = handleLowConfidence(reply, workingBody, resolvedBy, bestCandidate);
       if (!maybeAdjustedBody) {
         metrics.recordLowConfidence("reject");
         closeRequest("failure");
@@ -632,9 +663,9 @@ async function start(): Promise<void> {
       }
       if (maybeAdjustedBody !== workingBody) {
         metrics.recordLowConfidence("disable-thinking");
-      } else if ((bestCandidate?.score ?? 0) > 0) {
+      } else if (resolvedBy !== "explicit" && isConfidentSessionCandidate(bestCandidate)) {
         metrics.recordLowConfidence("allowed");
-      } else if (isRecentFallbackEligible(workingBody)) {
+      } else if (resolvedBy !== "explicit" && isRecentFallbackEligible(workingBody)) {
         metrics.recordLowConfidence("warn");
       }
       workingBody = maybeAdjustedBody;
@@ -687,6 +718,9 @@ async function start(): Promise<void> {
         contextCandidateSessions: contextSessions.length,
         bootstrapCandidateSessions: bootstrapSessions.length,
         bestCandidateScore: bestCandidate?.score ?? 0,
+        bestCandidateSecondScore: bestCandidate?.secondBestScore ?? 0,
+        bestCandidateScoreGap: bestCandidate?.scoreGap ?? 0,
+        bestCandidateMatchedTurns: bestCandidate?.matchedTurns ?? 0,
         bestCandidateCount: bestCandidate?.candidateCount ?? 0,
         lowConfidenceStrategy: config.lowConfidenceStrategy,
         stream: Boolean(workingBody.stream),

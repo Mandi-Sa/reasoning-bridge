@@ -1,6 +1,7 @@
 import type { ChatCompletionRequest, ChatMessage, SessionMatchCandidate, SessionRecord } from "../types.js";
 import { canonicalJson, normalizeText } from "../utils/canonical.js";
 import { sha256 } from "../utils/hash.js";
+import { buildMessageFingerprint } from "./fingerprint.js";
 
 export interface SessionResolutionInput {
   body: ChatCompletionRequest;
@@ -18,6 +19,11 @@ export interface DownstreamNamespace {
   authorizationHash: string;
   ipKey: string;
   userAgentKey: string;
+}
+
+interface SessionScoreResult {
+  score: number;
+  matchedTurns: number;
 }
 
 function readHeader(headers: Record<string, string | string[] | undefined>, name: string): string | undefined {
@@ -61,7 +67,10 @@ export function buildDownstreamNamespace(
   };
 }
 
-export function resolveExplicitSessionKey(input: SessionResolutionInput): SessionResolutionResult | undefined {
+export function resolveExplicitSessionKey(
+  input: SessionResolutionInput,
+  options?: { allowUserScopedSessions?: boolean }
+): SessionResolutionResult | undefined {
   const headerValue =
     readHeader(input.headers, "x-session-id") ??
     readHeader(input.headers, "x-conversation-id") ??
@@ -101,7 +110,7 @@ export function resolveExplicitSessionKey(input: SessionResolutionInput): Sessio
     }
   }
 
-  if (typeof bodyAny.user === "string" && bodyAny.user.trim()) {
+  if (options?.allowUserScopedSessions && typeof bodyAny.user === "string" && bodyAny.user.trim()) {
     const user = bodyAny.user.trim();
     return {
       sessionKey: `user:${user}`,
@@ -111,6 +120,28 @@ export function resolveExplicitSessionKey(input: SessionResolutionInput): Sessio
   }
 
   return undefined;
+}
+
+function buildAssistantFingerprint(message: ChatMessage) {
+  return buildMessageFingerprint({
+    role: "assistant",
+    content: message.content,
+    tool_calls: message.tool_calls,
+    reasoning_content: undefined
+  });
+}
+
+function getToolCallNames(message: ChatMessage): string[] {
+  return message.tool_calls?.map((toolCall) => toolCall.function?.name ?? "") ?? [];
+}
+
+function hasSameToolShape(left: ChatMessage, right: ChatMessage): boolean {
+  const leftNames = getToolCallNames(left);
+  const rightNames = getToolCallNames(right);
+  if (leftNames.length !== rightNames.length) {
+    return false;
+  }
+  return leftNames.every((name, index) => name === rightNames[index]);
 }
 
 function summarizeMessage(message: ChatMessage): string {
@@ -180,30 +211,52 @@ export function buildBootstrapKey(body: ChatCompletionRequest): string | undefin
   }))}`;
 }
 
-export function scoreSession(body: ChatCompletionRequest, session: SessionRecord): number {
-  const incomingAssistants = body.messages.filter((message) => message.role === "assistant");
-  const compareCount = Math.min(incomingAssistants.length, session.turns.length, 4);
-  if (!compareCount) {
-    return 0;
-  }
+function scoreSession(body: ChatCompletionRequest, session: SessionRecord): SessionScoreResult {
+  const incomingAssistants = body.messages
+    .filter((message) => message.role === "assistant")
+    .map((message) => ({
+      message,
+      fingerprint: buildAssistantFingerprint(message)
+    }));
+  const compareCount = Math.min(incomingAssistants.length, session.turns.length, 6);
+  let score = body.model === session.model ? 1 : 0;
+  let matchedTurns = 0;
 
-  let score = 0;
   for (let index = 0; index < compareCount; index += 1) {
     const incoming = incomingAssistants[incomingAssistants.length - 1 - index];
     const stored = session.turns[session.turns.length - 1 - index];
     if (!incoming || !stored) {
       continue;
     }
-    const incomingContent = normalizeText(incoming.content);
-    const storedContent = normalizeText(stored.message.content);
-    if (incomingContent && incomingContent === storedContent) {
-      score += 2;
+
+    if (stored.fingerprint.strict === incoming.fingerprint.strict) {
+      score += 8;
+      matchedTurns += 1;
+      continue;
     }
-    if ((incoming.tool_calls?.length ?? 0) === (stored.message.tool_calls?.length ?? 0)) {
-      score += 1;
+    if (stored.fingerprint.loose === incoming.fingerprint.loose) {
+      score += 6;
+      matchedTurns += 1;
+      continue;
+    }
+    if (stored.fingerprint.contentOnly === incoming.fingerprint.contentOnly) {
+      score += hasSameToolShape(incoming.message, stored.message as ChatMessage) ? 4 : 3;
+      matchedTurns += 1;
+      continue;
+    }
+
+    const incomingContent = normalizeText(incoming.message.content);
+    const storedContent = normalizeText(stored.message.content);
+    if (incomingContent && incomingContent === storedContent && hasSameToolShape(incoming.message, stored.message as ChatMessage)) {
+      score += 2;
+      matchedTurns += 1;
     }
   }
-  return score;
+
+  return {
+    score: score + matchedTurns,
+    matchedTurns
+  };
 }
 
 export function findBestSessionCandidate(
@@ -217,18 +270,37 @@ export function findBestSessionCandidate(
   }
 
   const ranked = [...sessions]
-    .map((session) => ({
+    .map((session) => {
+      const scored = scoreSession(input.body, session);
+      return {
       sessionKey: session.sessionKey,
       anchorKey: session.anchorKey,
-      score: scoreSession(input.body, session),
+      score: scored.score,
+      matchedTurns: scored.matchedTurns,
       candidateCount: sessions.length,
-      source
-    }))
-    .sort((left, right) => right.score - left.score);
+      source,
+      updatedAt: session.updatedAt
+      };
+    })
+    .sort((left, right) =>
+      right.score - left.score ||
+      right.matchedTurns - left.matchedTurns ||
+      right.updatedAt - left.updatedAt
+    );
 
   const best = ranked[0];
   if (!best || (!allowZeroScore && best.score <= 0)) {
     return undefined;
   }
-  return best;
+  const secondBestScore = ranked[1]?.score ?? 0;
+  return {
+    sessionKey: best.sessionKey,
+    anchorKey: best.anchorKey,
+    score: best.score,
+    secondBestScore,
+    scoreGap: best.score - secondBestScore,
+    matchedTurns: best.matchedTurns,
+    candidateCount: best.candidateCount,
+    source: best.source
+  };
 }

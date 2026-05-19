@@ -91,6 +91,9 @@ export interface SessionMatchCandidate {
   sessionKey: string;
   anchorKey: string;
   score: number;
+  secondBestScore: number;
+  scoreGap: number;
+  matchedTurns: number;
   candidateCount: number;
   source: "bootstrap" | "context-key" | "recent-fallback";
 }
