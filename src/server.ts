@@ -347,7 +347,7 @@ async function sendUpstreamReadError(
 
 function buildWarningHeaders(missingAssistantIndexes: number[], reply: FastifyReply): void {
   if (missingAssistantIndexes.length) {
-    reply.header("x-reasoning-bridge-warning", `missing-reasoning-for-assistant-indexes:${missingAssistantIndexes.join(",")}`);
+    appendWarning(reply, `missing-reasoning-for-assistant-indexes:${missingAssistantIndexes.join(",")}`);
   }
 }
 
@@ -361,7 +361,7 @@ function appendWarning(reply: FastifyReply, value: string): void {
 }
 
 function isRecentFallbackEligible(body: ChatCompletionRequest): boolean {
-  return body.messages.some((message) => message.role === "assistant" && !message.reasoning_content);
+  return getMissingReasoningAssistantIndexes(body.messages).length > 0;
 }
 
 function shouldDisableThinking(body: ChatCompletionRequest): boolean {
@@ -374,8 +374,15 @@ function disableThinkingMode(body: ChatCompletionRequest): ChatCompletionRequest
   return nextBody;
 }
 
+function getMissingReasoningAssistantIndexes(messages: ChatMessage[]): number[] {
+  return messages
+    .map((message, messageIndex) => ({ message, messageIndex }))
+    .filter((item) => item.message.role === "assistant" && !item.message.reasoning_content)
+    .map((item) => item.messageIndex);
+}
+
 function countEligibleAssistantMessages(messages: ChatMessage[]): number {
-  return messages.filter((message) => message.role === "assistant" && !message.reasoning_content).length;
+  return getMissingReasoningAssistantIndexes(messages).length;
 }
 
 function handleLowConfidence(
@@ -417,6 +424,36 @@ function handleLowConfidence(
     return disableThinkingMode(body);
   }
 
+  return body;
+}
+
+function handleUnrepairedThinkingMode(
+  reply: FastifyReply,
+  body: ChatCompletionRequest,
+  missingAssistantIndexes: number[]
+): ChatCompletionRequest | undefined {
+  if (!missingAssistantIndexes.length || !shouldDisableThinking(body)) {
+    return body;
+  }
+
+  appendWarning(reply, `unrepaired-reasoning-for-assistant-indexes:${missingAssistantIndexes.join(",")}`);
+
+  if (config.lowConfidenceStrategy === "reject") {
+    reply.code(409).send({
+      error: {
+        code: "unrepaired_reasoning_content",
+        message: "Bridge could not repair all assistant reasoning_content values required by thinking mode."
+      }
+    });
+    return undefined;
+  }
+
+  if (config.lowConfidenceStrategy === "disable-thinking") {
+    appendWarning(reply, "thinking-disabled-after-repair");
+    return disableThinkingMode(body);
+  }
+
+  appendWarning(reply, "unrepaired-reasoning-forwarded");
   return body;
 }
 
@@ -610,14 +647,27 @@ async function start(): Promise<void> {
       }
 
       const repairResult = repairMessages(workingBody.messages, session);
-      const repairedBody: ChatCompletionRequest = {
+      let repairedBody: ChatCompletionRequest = {
         ...workingBody,
         messages: repairResult.repairedMessages
       };
       const eligibleAssistantMessages = countEligibleAssistantMessages(workingBody.messages);
       const repairedAssistantMessages = repairResult.matches.length;
-      const missingAssistantMessages = repairResult.missingAssistantIndexes.length;
+      const finalMissingAssistantIndexes = getMissingReasoningAssistantIndexes(repairResult.repairedMessages);
+      const missingAssistantMessages = finalMissingAssistantIndexes.length;
       metrics.recordRepair(eligibleAssistantMessages, repairedAssistantMessages, missingAssistantMessages);
+
+      const maybeFinalBody = handleUnrepairedThinkingMode(reply, repairedBody, finalMissingAssistantIndexes);
+      if (!maybeFinalBody) {
+        metrics.recordLowConfidence("reject");
+        closeRequest("failure");
+        return;
+      }
+      if (maybeFinalBody !== repairedBody) {
+        metrics.recordLowConfidence("disable-thinking");
+        repairedBody = maybeFinalBody;
+        workingBody = maybeFinalBody;
+      }
 
       const requestHash = sha256(canonicalJson(buildRequestHashPayload(repairedBody)));
       await store.markInflight(session.sessionKey, {
@@ -626,7 +676,7 @@ async function start(): Promise<void> {
         stream: Boolean(body.stream)
       });
 
-      buildWarningHeaders(repairResult.missingAssistantIndexes, reply);
+      buildWarningHeaders(finalMissingAssistantIndexes, reply);
 
       request.log.info({
         namespaceKey: downstreamNamespace.namespaceKey,
@@ -641,7 +691,8 @@ async function start(): Promise<void> {
         lowConfidenceStrategy: config.lowConfidenceStrategy,
         stream: Boolean(workingBody.stream),
         matchCount: repairResult.matches.length,
-        missingAssistantIndexes: repairResult.missingAssistantIndexes
+        missingAssistantIndexes: finalMissingAssistantIndexes,
+        thinkingDisabled: !repairedBody.reasoning_effort && Boolean(body.reasoning_effort)
       }, "request repaired");
 
       if (config.logBody) {
