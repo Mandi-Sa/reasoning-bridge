@@ -672,8 +672,8 @@ export class RedisSessionStore implements SessionStore {
     const sessions = await this.loadSessions(allSessionKeys);
     const totals = summarizeSessions(sessions);
     const usedMemory = await this.estimateOwnedBytes();
-    const bootstrapKeyCount = await this.client.keys(`${this.prefix}:bootstrap:*`);
-    const anchorKeyCount = await this.client.keys(`${this.prefix}:anchor:*`);
+    const bootstrapKeyCount = await this.countKeysByPattern(`${this.prefix}:bootstrap:*`);
+    const anchorKeyCount = await this.countKeysByPattern(`${this.prefix}:anchor:*`);
 
     return {
       driver: "redis",
@@ -690,8 +690,8 @@ export class RedisSessionStore implements SessionStore {
       },
       backend: {
         redisPrefix: this.prefix,
-        anchorSetCount: anchorKeyCount.length,
-        bootstrapSetCount: bootstrapKeyCount.length
+        anchorSetCount: anchorKeyCount,
+        bootstrapSetCount: bootstrapKeyCount
       }
     };
   }
@@ -801,35 +801,55 @@ export class RedisSessionStore implements SessionStore {
   }
 
   private async estimateOwnedBytes(): Promise<number> {
-    const sessionRedisKeys = await this.client.keys(`${this.prefix}:session:*`);
-    if (!sessionRedisKeys.length) {
-      return 0;
-    }
-
     let totalBytes = 0;
     const chunkSize = 256;
-    for (let index = 0; index < sessionRedisKeys.length; index += chunkSize) {
-      const chunk = sessionRedisKeys.slice(index, index + chunkSize);
-      const values = await this.client.mGet(chunk);
-      totalBytes += values.reduce((sum, value, valueIndex) => {
-        const key = chunk[valueIndex] ?? "";
-        const keyBytes = Buffer.byteLength(key, "utf8");
-        const valueBytes = Buffer.byteLength(value ?? "", "utf8");
-        return sum + keyBytes + valueBytes;
-      }, 0);
+    let sessionChunk: string[] = [];
+    for await (const keys of this.client.scanIterator({
+      MATCH: `${this.prefix}:session:*`,
+      COUNT: chunkSize
+    })) {
+      sessionChunk.push(...keys);
+      while (sessionChunk.length >= chunkSize) {
+        totalBytes += await this.estimateSessionChunkBytes(sessionChunk.slice(0, chunkSize));
+        sessionChunk = sessionChunk.slice(chunkSize);
+      }
     }
+    totalBytes += await this.estimateSessionChunkBytes(sessionChunk);
 
-    const anchorKeys = await this.client.keys(`${this.prefix}:anchor:*`);
-    const bootstrapKeys = await this.client.keys(`${this.prefix}:bootstrap:*`);
-    totalBytes += this.estimateKeyListBytes(anchorKeys);
-    totalBytes += this.estimateKeyListBytes(bootstrapKeys);
+    totalBytes += await this.estimatePatternKeyBytes(`${this.prefix}:anchor:*`);
+    totalBytes += await this.estimatePatternKeyBytes(`${this.prefix}:bootstrap:*`);
     totalBytes += Buffer.byteLength(this.lruKey(), "utf8");
 
     return totalBytes;
   }
 
-  private estimateKeyListBytes(keys: string[]): number {
-    return keys.reduce((sum, key) => sum + Buffer.byteLength(key, "utf8"), 0);
+  private async estimateSessionChunkBytes(keys: string[]): Promise<number> {
+    if (!keys.length) {
+      return 0;
+    }
+    const values = await this.client.mGet(keys);
+    return values.reduce((sum, value, valueIndex) => {
+      const key = keys[valueIndex] ?? "";
+      const keyBytes = Buffer.byteLength(key, "utf8");
+      const valueBytes = Buffer.byteLength(value ?? "", "utf8");
+      return sum + keyBytes + valueBytes;
+    }, 0);
+  }
+
+  private async estimatePatternKeyBytes(pattern: string): Promise<number> {
+    let totalBytes = 0;
+    for await (const keys of this.client.scanIterator({ MATCH: pattern, COUNT: 256 })) {
+      totalBytes += keys.reduce((sum, key) => sum + Buffer.byteLength(key, "utf8"), 0);
+    }
+    return totalBytes;
+  }
+
+  private async countKeysByPattern(pattern: string): Promise<number> {
+    let count = 0;
+    for await (const keys of this.client.scanIterator({ MATCH: pattern, COUNT: 256 })) {
+      count += keys.length;
+    }
+    return count;
   }
 }
 
