@@ -12,7 +12,10 @@ export interface BridgeConfig {
   logBody: boolean;
   recentFallbackLimit: number;
   recentFallbackMinScore: number;
+  sessionMatchMinScore: number;
+  sessionMatchMinMargin: number;
   lowConfidenceStrategy: "warn" | "disable-thinking" | "reject";
+  allowUserScopedSessions: boolean;
   sessionStoreDriver: "memory" | "sqlite" | "redis";
   sessionStoreFilePath: string;
   redisUrl: string | undefined;
@@ -33,7 +36,10 @@ interface BridgeConfigFileShape {
   logBody?: boolean;
   recentFallbackLimit?: number;
   recentFallbackMinScore?: number;
+  sessionMatchMinScore?: number;
+  sessionMatchMinMargin?: number;
   lowConfidenceStrategy?: "warn" | "disable-thinking" | "reject";
+  allowUserScopedSessions?: boolean;
   sessionStoreDriver?: "memory" | "sqlite" | "redis";
   sessionStoreFilePath?: string;
   redisUrl?: string;
@@ -117,7 +123,10 @@ export function loadConfig(): BridgeConfig {
     logBody: fileConfig.logBody ?? false,
     recentFallbackLimit: readNumber(fileConfig.recentFallbackLimit, 32, "recentFallbackLimit"),
     recentFallbackMinScore: readNumber(fileConfig.recentFallbackMinScore, 2, "recentFallbackMinScore"),
+    sessionMatchMinScore: readNumber(fileConfig.sessionMatchMinScore, 6, "sessionMatchMinScore"),
+    sessionMatchMinMargin: readNumber(fileConfig.sessionMatchMinMargin, 3, "sessionMatchMinMargin"),
     lowConfidenceStrategy: readLowConfidenceStrategy(fileConfig.lowConfidenceStrategy),
+    allowUserScopedSessions: fileConfig.allowUserScopedSessions ?? false,
     sessionStoreDriver,
     sessionStoreFilePath: fileConfig.sessionStoreFilePath ?? "./data/sessions.sqlite",
     redisUrl: fileConfig.redisUrl,

@@ -81,7 +81,10 @@ Example `config.example.json`:
   "logBody": false,
   "recentFallbackLimit": 32,
   "recentFallbackMinScore": 2,
+  "sessionMatchMinScore": 6,
+  "sessionMatchMinMargin": 3,
   "lowConfidenceStrategy": "disable-thinking",
+  "allowUserScopedSessions": false,
   "sessionStoreDriver": "sqlite",
   "sessionStoreFilePath": "./data/sessions.sqlite",
   "redisUrl": "redis://127.0.0.1:6379/12",
@@ -104,7 +107,10 @@ Key fields:
 - `logBody`: enable request body logging
 - `recentFallbackLimit`: recent-session fallback search size
 - `recentFallbackMinScore`: minimum score for recent-session fallback
+- `sessionMatchMinScore`: minimum score required before the bridge trusts an inferred session
+- `sessionMatchMinMargin`: minimum lead over the runner-up candidate when multiple sessions compete
 - `lowConfidenceStrategy`: `warn`, `disable-thinking`, or `reject`
+- `allowUserScopedSessions`: when `true`, the bridge may use the request `user` field as an explicit session key. Keep this `false` unless your callers guarantee stable, unique `user` values.
 - `sessionStoreDriver`: `memory`, `sqlite`, or `redis`
 - `sessionStoreFilePath`: SQLite file path
 - `redisUrl`: Redis connection URL, optionally including DB index
