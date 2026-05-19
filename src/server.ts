@@ -651,12 +651,13 @@ async function start(): Promise<void> {
       let contextSessions: SessionRecord[] = [];
       let bootstrapSessions: SessionRecord[] = [];
       let bestCandidate: SessionMatchCandidate | undefined;
+      let provisionalCandidate: SessionMatchCandidate | undefined;
 
       if (!resolved) {
         contextSessions = await store.listByAnchor(anchorKey);
         bootstrapSessions = bootstrapKey ? await store.listByBootstrapKey(bootstrapKey) : [];
 
-        bestCandidate =
+        provisionalCandidate =
           findBestSessionCandidate(
             { body: workingBody, headers: request.headers },
             bootstrapSessions,
@@ -671,13 +672,16 @@ async function start(): Promise<void> {
           );
       }
 
-      if (!resolved && bestCandidate) {
+      if (!resolved && provisionalCandidate && isConfidentSessionCandidate(provisionalCandidate)) {
         resolved = {
-          sessionKey: bestCandidate.sessionKey,
-          anchorKey: bestCandidate.anchorKey,
-          source: bestCandidate.source
+          sessionKey: provisionalCandidate.sessionKey,
+          anchorKey: provisionalCandidate.anchorKey,
+          source: provisionalCandidate.source
         };
-        resolvedBy = bestCandidate.source;
+        resolvedBy = provisionalCandidate.source;
+        bestCandidate = provisionalCandidate;
+      } else if (!bestCandidate && provisionalCandidate) {
+        bestCandidate = provisionalCandidate;
       }
 
       if (!resolved && isRecentFallbackEligible(workingBody)) {
