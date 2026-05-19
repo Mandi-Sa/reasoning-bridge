@@ -23,6 +23,16 @@ function getMessageFromChoice(choice: unknown): ChatMessage | undefined {
   return message as unknown as ChatMessage;
 }
 
+function extractReasoningText(message: ChatMessage | Record<string, unknown>): string | undefined {
+  if (typeof message.reasoning_content === "string") {
+    return message.reasoning_content;
+  }
+  if (typeof message.reasoning === "string") {
+    return message.reasoning;
+  }
+  return undefined;
+}
+
 export function extractAssistantMessageFromCompletion(payload: unknown): AssistantMessageSnapshot | undefined {
   const object = asObject(payload);
   const choices = Array.isArray(object?.choices) ? object.choices : [];
@@ -36,7 +46,7 @@ export function extractAssistantMessageFromCompletion(payload: unknown): Assista
     role: "assistant",
     content: message.content,
     tool_calls: message.tool_calls,
-    reasoning_content: typeof message.reasoning_content === "string" ? message.reasoning_content : undefined
+    reasoning_content: extractReasoningText(message)
   };
 }
 
@@ -99,8 +109,9 @@ export function consumeSseEvent(state: StreamAssemblerState, data: string): void
     if (typeof delta.content === "string") {
       state.contentParts.push(delta.content);
     }
-    if (typeof delta.reasoning_content === "string") {
-      state.reasoningParts.push(delta.reasoning_content);
+    const reasoningText = extractReasoningText(delta);
+    if (typeof reasoningText === "string") {
+      state.reasoningParts.push(reasoningText);
     }
 
     const toolCalls = Array.isArray(delta.tool_calls) ? delta.tool_calls : [];

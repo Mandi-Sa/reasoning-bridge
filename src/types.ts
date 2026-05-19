@@ -22,6 +22,7 @@ export interface ChatMessage {
   tool_call_id?: string;
   tool_calls?: ToolCall[];
   reasoning_content?: string;
+  reasoning?: string;
   [key: string]: JsonValue | undefined;
 }
 
