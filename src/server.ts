@@ -683,7 +683,7 @@ async function start(): Promise<void> {
         messages: repairResult.repairedMessages
       };
       const eligibleAssistantMessages = countEligibleAssistantMessages(workingBody.messages);
-      const repairedAssistantMessages = repairResult.matches.length;
+      const repairedAssistantMessages = repairResult.repairedAssistantIndexes.length;
       const finalMissingAssistantIndexes = getMissingReasoningAssistantIndexes(repairResult.repairedMessages);
       const missingAssistantMessages = finalMissingAssistantIndexes.length;
       metrics.recordRepair(eligibleAssistantMessages, repairedAssistantMessages, missingAssistantMessages);
@@ -725,6 +725,7 @@ async function start(): Promise<void> {
         lowConfidenceStrategy: config.lowConfidenceStrategy,
         stream: Boolean(workingBody.stream),
         matchCount: repairResult.matches.length,
+        repairedAssistantIndexes: repairResult.repairedAssistantIndexes,
         missingAssistantIndexes: finalMissingAssistantIndexes,
         thinkingDisabled: !repairedBody.reasoning_effort && Boolean(body.reasoning_effort)
       }, "request repaired");

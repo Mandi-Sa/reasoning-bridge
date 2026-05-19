@@ -78,12 +78,14 @@ export interface SessionRecord {
 export interface RepairMatch {
   messageIndex: number;
   turnId: string;
-  strategy: "strict-fingerprint" | "loose-fingerprint" | "ordered-fallback";
+  strategy: "strict-fingerprint" | "loose-fingerprint" | "content-only-fingerprint";
+  filledReasoning: boolean;
 }
 
 export interface RepairResult {
   repairedMessages: ChatMessage[];
   matches: RepairMatch[];
+  repairedAssistantIndexes: number[];
   missingAssistantIndexes: number[];
 }
 
