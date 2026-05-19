@@ -33,8 +33,25 @@ import { canonicalJson } from "./utils/canonical.js";
 import { sha256 } from "./utils/hash.js";
 
 const config = loadConfig();
+const logger = config.logPretty
+  ? {
+      level: config.logLevel,
+      transport: {
+        target: "pino-pretty",
+        options: {
+          colorize: config.logColorize,
+          translateTime: "SYS:yyyy-mm-dd HH:MM:ss.l",
+          levelFirst: true,
+          singleLine: true,
+          ignore: "pid,hostname"
+        }
+      }
+    }
+  : {
+      level: config.logLevel
+    };
 const app = Fastify({
-  logger: true,
+  logger,
   bodyLimit: 10 * 1024 * 1024
 });
 const metrics = new BridgeMetrics();
@@ -589,6 +606,9 @@ async function start(): Promise<void> {
       config: {
         host: config.host,
         port: config.port,
+        logLevel: config.logLevel,
+        logPretty: config.logPretty,
+        logColorize: config.logColorize,
         upstreamBaseUrl: config.upstreamBaseUrl,
         upstreamPath: config.upstreamPath,
         sessionStoreDriver: config.sessionStoreDriver,

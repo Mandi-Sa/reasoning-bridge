@@ -4,6 +4,9 @@ import { resolve } from "node:path";
 export interface BridgeConfig {
   host: string;
   port: number;
+  logLevel: "trace" | "debug" | "info" | "warn" | "error" | "fatal" | "silent";
+  logPretty: boolean;
+  logColorize: boolean;
   upstreamBaseUrl: string;
   upstreamApiKey: string;
   upstreamPath: string;
@@ -35,6 +38,9 @@ export interface BridgeConfig {
 interface BridgeConfigFileShape {
   host?: string;
   port?: number;
+  logLevel?: "trace" | "debug" | "info" | "warn" | "error" | "fatal" | "silent";
+  logPretty?: boolean;
+  logColorize?: boolean;
   upstreamBaseUrl?: string;
   upstreamApiKey?: string;
   upstreamPath?: string;
@@ -80,6 +86,16 @@ function readLowConfidenceStrategy(value: string | undefined): "warn" | "disable
     return raw;
   }
   throw new Error(`Invalid lowConfidenceStrategy: ${raw}`);
+}
+
+function readLogLevel(
+  value: string | undefined
+): "trace" | "debug" | "info" | "warn" | "error" | "fatal" | "silent" {
+  const raw = (value ?? "info").toLowerCase();
+  if (raw === "trace" || raw === "debug" || raw === "info" || raw === "warn" || raw === "error" || raw === "fatal" || raw === "silent") {
+    return raw;
+  }
+  throw new Error(`Invalid logLevel: ${raw}`);
 }
 
 function loadConfigFile(): BridgeConfigFileShape {
@@ -129,6 +145,9 @@ export function loadConfig(): BridgeConfig {
   return {
     host: fileConfig.host ?? "0.0.0.0",
     port: readNumber(fileConfig.port, 8787, "port"),
+    logLevel: readLogLevel(fileConfig.logLevel),
+    logPretty: fileConfig.logPretty ?? true,
+    logColorize: fileConfig.logColorize ?? true,
     upstreamBaseUrl: upstreamBaseUrl.replace(/\/+$/, ""),
     upstreamApiKey,
     upstreamPath: fileConfig.upstreamPath ?? "/v1/chat/completions",
