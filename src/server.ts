@@ -365,7 +365,7 @@ function isRecentFallbackEligible(body: ChatCompletionRequest): boolean {
   return getMissingReasoningAssistantIndexes(body.messages).length > 0;
 }
 
-function shouldDisableThinking(body: ChatCompletionRequest): boolean {
+function canDisableThinking(body: ChatCompletionRequest): boolean {
   return typeof body.reasoning_effort === "string";
 }
 
@@ -438,9 +438,19 @@ function handleLowConfidence(
     return undefined;
   }
 
-  if (config.lowConfidenceStrategy === "disable-thinking" && shouldDisableThinking(body)) {
-    appendWarning(reply, "thinking-disabled-by-bridge");
-    return disableThinkingMode(body);
+  if (config.lowConfidenceStrategy === "disable-thinking") {
+    if (canDisableThinking(body)) {
+      appendWarning(reply, "thinking-disabled-by-bridge");
+      return disableThinkingMode(body);
+    }
+
+    reply.code(409).send({
+      error: {
+        code: "low_confidence_reasoning_repair_required",
+        message: "Bridge could not safely recover prior reasoning_content, and this request does not expose an explicit thinking toggle to disable before forwarding."
+      }
+    });
+    return undefined;
   }
 
   return body;
@@ -451,7 +461,7 @@ function handleUnrepairedThinkingMode(
   body: ChatCompletionRequest,
   missingAssistantIndexes: number[]
 ): ChatCompletionRequest | undefined {
-  if (!missingAssistantIndexes.length || !shouldDisableThinking(body)) {
+  if (!missingAssistantIndexes.length) {
     return body;
   }
 
@@ -468,8 +478,18 @@ function handleUnrepairedThinkingMode(
   }
 
   if (config.lowConfidenceStrategy === "disable-thinking") {
-    appendWarning(reply, "thinking-disabled-after-repair");
-    return disableThinkingMode(body);
+    if (canDisableThinking(body)) {
+      appendWarning(reply, "thinking-disabled-after-repair");
+      return disableThinkingMode(body);
+    }
+
+    reply.code(409).send({
+      error: {
+        code: "unrepaired_reasoning_content",
+        message: "Bridge could not repair all assistant reasoning_content values, and this request does not expose an explicit thinking toggle to disable before forwarding."
+      }
+    });
+    return undefined;
   }
 
   appendWarning(reply, "unrepaired-reasoning-forwarded");
