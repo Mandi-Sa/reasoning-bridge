@@ -30,6 +30,7 @@ export interface ChatCompletionRequest extends JsonObject {
   messages: ChatMessage[];
   stream?: boolean;
   reasoning_effort?: string;
+  thinking?: JsonObject;
 }
 
 export interface AssistantMessageSnapshot {

@@ -369,10 +369,12 @@ function disableThinkingMode(body: ChatCompletionRequest): ChatCompletionRequest
   const nextBody = { ...body };
   if (typeof body.reasoning_effort === "string") {
     delete nextBody.reasoning_effort;
-    return nextBody;
   }
   if (config.forceInjectReasoningEffortNone) {
-    nextBody.reasoning_effort = "none";
+    nextBody.thinking = {
+      ...(body.thinking && typeof body.thinking === "object" && !Array.isArray(body.thinking) ? body.thinking : {}),
+      type: "disabled"
+    };
   }
   return nextBody;
 }
