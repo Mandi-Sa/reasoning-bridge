@@ -389,7 +389,7 @@ function countEligibleAssistantMessages(messages: ChatMessage[]): number {
 }
 
 function shouldAttachRequestContextToSession(
-  resolvedBy: "explicit" | "bootstrap" | "context-key" | "recent-fallback" | "created",
+  resolvedBy: "explicit" | "bootstrap" | "context-key" | "recent-fallback" | "cross-namespace-fallback" | "created",
   resolvedAnchorKey: string,
   currentAnchorKey: string,
   repairedMatchCount: number
@@ -405,7 +405,7 @@ function shouldAttachRequestContextToSession(
 
 function shouldIsolateMismatchedInferredSession(
   body: ChatCompletionRequest,
-  resolvedBy: "explicit" | "bootstrap" | "context-key" | "recent-fallback" | "created",
+  resolvedBy: "explicit" | "bootstrap" | "context-key" | "recent-fallback" | "cross-namespace-fallback" | "created",
   matchCount: number
 ): boolean {
   if (resolvedBy === "explicit" || resolvedBy === "created") {
@@ -435,7 +435,7 @@ function isConfidentSessionCandidate(candidate: SessionMatchCandidate | undefine
 
 function buildLowConfidenceWarning(
   candidate: SessionMatchCandidate | undefined,
-  resolvedBy: "explicit" | "bootstrap" | "context-key" | "recent-fallback" | "created"
+  resolvedBy: "explicit" | "bootstrap" | "context-key" | "recent-fallback" | "cross-namespace-fallback" | "created"
 ): string {
   if (!candidate) {
     return `low-confidence-session-match:source=${resolvedBy},score=0,gap=0,matched=0`;
@@ -446,7 +446,7 @@ function buildLowConfidenceWarning(
 function handleLowConfidence(
   reply: FastifyReply,
   body: ChatCompletionRequest,
-  resolvedBy: "explicit" | "bootstrap" | "context-key" | "recent-fallback" | "created",
+  resolvedBy: "explicit" | "bootstrap" | "context-key" | "recent-fallback" | "cross-namespace-fallback" | "created",
   bestCandidate: SessionMatchCandidate | undefined
 ): ChatCompletionRequest | undefined {
   if (resolvedBy === "explicit" || !isRecentFallbackEligible(body)) {
@@ -647,7 +647,7 @@ async function start(): Promise<void> {
         sessionKey: qualifyKey(downstreamNamespace.namespaceKey, explicit.sessionKey),
         anchorKey: qualifyKey(downstreamNamespace.namespaceKey, explicit.anchorKey)
       } : undefined;
-      let resolvedBy: "explicit" | "bootstrap" | "context-key" | "recent-fallback" | "created" = explicit ? "explicit" : "created";
+      let resolvedBy: "explicit" | "bootstrap" | "context-key" | "recent-fallback" | "cross-namespace-fallback" | "created" = explicit ? "explicit" : "created";
       let contextSessions: SessionRecord[] = [];
       let bootstrapSessions: SessionRecord[] = [];
       let bestCandidate: SessionMatchCandidate | undefined;
@@ -698,6 +698,33 @@ async function start(): Promise<void> {
               source: recentFallback.source
             };
             resolvedBy = recentFallback.source;
+          }
+        }
+      }
+
+      if (!resolved && config.allowCrossNamespaceRecovery && isRecentFallbackEligible(workingBody)) {
+        const allRecentSessions = await store.listRecent(config.recentFallbackLimit);
+        const crossNamespaceSessions = allRecentSessions.filter((session) =>
+          !session.sessionKey.startsWith(`${downstreamNamespace.namespaceKey}:`)
+        );
+
+        const crossNamespaceFallback = findBestSessionCandidate(
+          { body: workingBody, headers: request.headers },
+          crossNamespaceSessions,
+          "cross-namespace-fallback"
+        );
+        if (crossNamespaceFallback) {
+          bestCandidate = crossNamespaceFallback;
+          if (
+            crossNamespaceFallback.score >= config.crossNamespaceMinScore &&
+            (crossNamespaceFallback.candidateCount <= 1 || crossNamespaceFallback.scoreGap >= config.crossNamespaceMinMargin)
+          ) {
+            resolved = {
+              sessionKey: crossNamespaceFallback.sessionKey,
+              anchorKey: crossNamespaceFallback.anchorKey,
+              source: crossNamespaceFallback.source
+            };
+            resolvedBy = crossNamespaceFallback.source;
           }
         }
       }

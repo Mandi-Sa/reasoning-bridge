@@ -89,6 +89,9 @@ Example `config.example.json`:
   "namespaceIncludeAuthorization": true,
   "namespaceIncludeUserAgent": true,
   "namespaceIncludeIp": false,
+  "allowCrossNamespaceRecovery": false,
+  "crossNamespaceMinScore": 10,
+  "crossNamespaceMinMargin": 4,
   "allowUserScopedSessions": false,
   "sessionStoreDriver": "sqlite",
   "sessionStoreFilePath": "./data/sessions.sqlite",
@@ -119,6 +122,9 @@ Key fields:
 - `namespaceIncludeAuthorization`: include downstream `Authorization` in the namespace key
 - `namespaceIncludeUserAgent`: include downstream `User-Agent` in the namespace key
 - `namespaceIncludeIp`: include downstream IP-derived data in the namespace key. Default is `false` because IPs behind CDNs, reverse proxies, or CGNAT are often unstable
+- `allowCrossNamespaceRecovery`: allow recent-session recovery across namespaces when local namespace lookup fails
+- `crossNamespaceMinScore`: minimum candidate score required before the bridge trusts a cross-namespace recovery
+- `crossNamespaceMinMargin`: minimum lead over the runner-up candidate for cross-namespace recovery when multiple candidates compete
 - `allowUserScopedSessions`: when `true`, the bridge may use the request `user` field as an explicit session key. Keep this `false` unless your callers guarantee stable, unique `user` values.
 - `sessionStoreDriver`: `memory`, `sqlite`, or `redis`
 - `sessionStoreFilePath`: SQLite file path

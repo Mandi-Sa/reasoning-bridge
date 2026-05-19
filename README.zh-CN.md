@@ -89,6 +89,9 @@ npm start
   "namespaceIncludeAuthorization": true,
   "namespaceIncludeUserAgent": true,
   "namespaceIncludeIp": false,
+  "allowCrossNamespaceRecovery": false,
+  "crossNamespaceMinScore": 10,
+  "crossNamespaceMinMargin": 4,
   "sessionStoreDriver": "sqlite",
   "sessionStoreFilePath": "./data/sessions.sqlite",
   "redisUrl": "redis://127.0.0.1:6379/12",
@@ -118,6 +121,9 @@ npm start
 - `namespaceIncludeAuthorization`：是否把下游 `Authorization` 纳入 namespace 计算
 - `namespaceIncludeUserAgent`：是否把下游 `User-Agent` 纳入 namespace 计算
 - `namespaceIncludeIp`：是否把下游 IP 纳入 namespace 计算。默认 `false`，因为 CDN、反代、CGNAT 后的 IP 往往不稳定
+- `allowCrossNamespaceRecovery`：当当前 namespace 下找不到合适会话时，是否允许从最近会话中跨 namespace 尝试恢复
+- `crossNamespaceMinScore`：允许跨 namespace 恢复前要求达到的最小候选分数
+- `crossNamespaceMinMargin`：多个跨 namespace 候选竞争时，第一名相对第二名至少要领先的分数
 - `sessionStoreDriver`：可选 `memory`、`sqlite`、`redis`
 - `sessionStoreFilePath`：SQLite 文件路径
 - `redisUrl`：Redis 连接地址，可包含 DB 库编号

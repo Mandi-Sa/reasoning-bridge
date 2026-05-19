@@ -13,7 +13,7 @@ export interface SessionResolutionInput {
 export interface SessionResolutionResult {
   sessionKey: string;
   anchorKey: string;
-  source: "header" | "body" | "user" | "bootstrap" | "context-key" | "recent-fallback";
+  source: "header" | "body" | "user" | "bootstrap" | "context-key" | "recent-fallback" | "cross-namespace-fallback";
 }
 
 export interface DownstreamNamespace {
@@ -284,7 +284,7 @@ function scoreSession(body: ChatCompletionRequest, session: SessionRecord): Sess
 export function findBestSessionCandidate(
   input: SessionResolutionInput,
   sessions: SessionRecord[],
-  source: "bootstrap" | "context-key" | "recent-fallback",
+  source: "bootstrap" | "context-key" | "recent-fallback" | "cross-namespace-fallback",
   allowZeroScore = false
 ): SessionMatchCandidate | undefined {
   if (!sessions.length) {

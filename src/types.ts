@@ -104,7 +104,7 @@ export interface SessionMatchCandidate {
   scoreGap: number;
   matchedTurns: number;
   candidateCount: number;
-  source: "bootstrap" | "context-key" | "recent-fallback";
+  source: "bootstrap" | "context-key" | "recent-fallback" | "cross-namespace-fallback";
 }
 
 export interface UpstreamErrorShape extends JsonObject {

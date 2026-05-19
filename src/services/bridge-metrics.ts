@@ -29,6 +29,7 @@ export interface BridgeMetricsSnapshot {
     bootstrap: number;
     contextKey: number;
     recentFallback: number;
+    crossNamespaceFallback: number;
     created: number;
   };
   lowConfidence: {
@@ -71,6 +72,7 @@ export class BridgeMetrics {
   private resolutionBootstrap = 0;
   private resolutionContextKey = 0;
   private resolutionRecentFallback = 0;
+  private resolutionCrossNamespaceFallback = 0;
   private resolutionCreated = 0;
   private lowConfidenceAllowed = 0;
   private lowConfidenceDisabledThinking = 0;
@@ -120,7 +122,7 @@ export class BridgeMetrics {
     }
   }
 
-  recordResolution(source: "explicit" | "bootstrap" | "context-key" | "recent-fallback" | "created"): void {
+  recordResolution(source: "explicit" | "bootstrap" | "context-key" | "recent-fallback" | "cross-namespace-fallback" | "created"): void {
     if (source === "explicit") {
       this.resolutionExplicit += 1;
       return;
@@ -135,6 +137,10 @@ export class BridgeMetrics {
     }
     if (source === "recent-fallback") {
       this.resolutionRecentFallback += 1;
+      return;
+    }
+    if (source === "cross-namespace-fallback") {
+      this.resolutionCrossNamespaceFallback += 1;
       return;
     }
     this.resolutionCreated += 1;
@@ -205,6 +211,7 @@ export class BridgeMetrics {
         bootstrap: this.resolutionBootstrap,
         contextKey: this.resolutionContextKey,
         recentFallback: this.resolutionRecentFallback,
+        crossNamespaceFallback: this.resolutionCrossNamespaceFallback,
         created: this.resolutionCreated
       },
       lowConfidence: {

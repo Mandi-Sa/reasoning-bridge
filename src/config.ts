@@ -19,6 +19,9 @@ export interface BridgeConfig {
   namespaceIncludeAuthorization: boolean;
   namespaceIncludeUserAgent: boolean;
   namespaceIncludeIp: boolean;
+  allowCrossNamespaceRecovery: boolean;
+  crossNamespaceMinScore: number;
+  crossNamespaceMinMargin: number;
   allowUserScopedSessions: boolean;
   sessionStoreDriver: "memory" | "sqlite" | "redis";
   sessionStoreFilePath: string;
@@ -47,6 +50,9 @@ interface BridgeConfigFileShape {
   namespaceIncludeAuthorization?: boolean;
   namespaceIncludeUserAgent?: boolean;
   namespaceIncludeIp?: boolean;
+  allowCrossNamespaceRecovery?: boolean;
+  crossNamespaceMinScore?: number;
+  crossNamespaceMinMargin?: number;
   allowUserScopedSessions?: boolean;
   sessionStoreDriver?: "memory" | "sqlite" | "redis";
   sessionStoreFilePath?: string;
@@ -138,6 +144,9 @@ export function loadConfig(): BridgeConfig {
     namespaceIncludeAuthorization: fileConfig.namespaceIncludeAuthorization ?? true,
     namespaceIncludeUserAgent: fileConfig.namespaceIncludeUserAgent ?? true,
     namespaceIncludeIp: fileConfig.namespaceIncludeIp ?? false,
+    allowCrossNamespaceRecovery: fileConfig.allowCrossNamespaceRecovery ?? false,
+    crossNamespaceMinScore: readNumber(fileConfig.crossNamespaceMinScore, 10, "crossNamespaceMinScore"),
+    crossNamespaceMinMargin: readNumber(fileConfig.crossNamespaceMinMargin, 4, "crossNamespaceMinMargin"),
     allowUserScopedSessions: fileConfig.allowUserScopedSessions ?? false,
     sessionStoreDriver,
     sessionStoreFilePath: fileConfig.sessionStoreFilePath ?? "./data/sessions.sqlite",
