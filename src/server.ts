@@ -357,6 +357,20 @@ function appendWarning(reply: FastifyReply, value: string): void {
   reply.header("x-reasoning-bridge-warning", value);
 }
 
+function abbreviateBridgeKey(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  if (value.length <= 32) {
+    return value;
+  }
+  return `${value.slice(0, 24)}...${value.slice(-8)}`;
+}
+
+function formatIndexList(indexes: number[]): string {
+  return indexes.length ? indexes.join(",") : "-";
+}
+
 function isRecentFallbackEligible(body: ChatCompletionRequest): boolean {
   return getMissingReasoningAssistantIndexes(body.messages).length > 0;
 }
@@ -911,12 +925,24 @@ async function start(): Promise<void> {
 
       buildWarningHeaders(finalMissingAssistantIndexes, reply);
 
+      const thinkingDisabled =
+        !repairedBody.reasoning_effort &&
+        Boolean(body.reasoning_effort);
+      const repairSummary =
+        `repair source=${resolved.source}` +
+        ` score=${bestCandidate?.score ?? 0}` +
+        ` matched=${repairResult.matches.length}` +
+        ` repaired=${repairResult.repairedAssistantIndexes.length}` +
+        ` missing=${finalMissingAssistantIndexes.length}` +
+        ` thinkingDisabled=${thinkingDisabled ? "yes" : "no"}` +
+        ` session=${abbreviateBridgeKey(session.sessionKey)}`;
+
       request.log.info({
-        namespaceKey: downstreamNamespace.namespaceKey,
-        sessionKey: session.sessionKey,
+        namespaceKey: abbreviateBridgeKey(downstreamNamespace.namespaceKey),
+        sessionKey: abbreviateBridgeKey(session.sessionKey),
         source: resolved.source,
-        anchorKey,
-        bootstrapKey: bootstrapKey ?? null,
+        anchorKey: abbreviateBridgeKey(anchorKey),
+        bootstrapKey: abbreviateBridgeKey(bootstrapKey),
         contextCandidateSessions: contextSessions.length,
         bootstrapCandidateSessions: bootstrapSessions.length,
         bestCandidateScore: bestCandidate?.score ?? 0,
@@ -927,10 +953,10 @@ async function start(): Promise<void> {
         lowConfidenceStrategy: config.lowConfidenceStrategy,
         stream: Boolean(workingBody.stream),
         matchCount: repairResult.matches.length,
-        repairedAssistantIndexes: repairResult.repairedAssistantIndexes,
-        missingAssistantIndexes: finalMissingAssistantIndexes,
-        thinkingDisabled: !repairedBody.reasoning_effort && Boolean(body.reasoning_effort)
-      }, "request repaired");
+        repairedAssistantIndexes: formatIndexList(repairResult.repairedAssistantIndexes),
+        missingAssistantIndexes: formatIndexList(finalMissingAssistantIndexes),
+        thinkingDisabled
+      }, repairSummary);
 
       if (config.logBody) {
         request.log.info({
