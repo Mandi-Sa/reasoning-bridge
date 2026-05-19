@@ -22,6 +22,7 @@ In that setup, Reasoning Bridge reconstructs the missing reasoning payload from 
 - Streaming (`stream: true`) passthrough with side-channel response assembly
 - Session storage with `memory`, `sqlite`, or `redis`
 - Capacity-based cleanup with LRU-style eviction
+- Layered repair matching with strict, loose, content-only, and tool-call-based fallbacks
 - Basic health and debug endpoints
 - SQLite to Redis migration
 - Redis to SQLite migration

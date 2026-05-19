@@ -178,6 +178,116 @@ function matchContentOnlyCandidates(
   }
 }
 
+function matchToolOnlyCandidates(
+  incoming: IncomingAssistantMessage[],
+  storedTurns: AssistantTurn[],
+  existingMatches: Map<number, MatchedTurnCandidate>
+): void {
+  const usedTurnIds = new Set([...existingMatches.values()].map((item) => item.turn.turnId));
+
+  for (const item of incoming) {
+    if (existingMatches.has(item.messageIndex) || !item.message.tool_calls?.length) {
+      continue;
+    }
+
+    const { start, end } = getSearchWindow(incoming, existingMatches, item.assistantOrder, storedTurns.length - 1);
+    if (start > end) {
+      continue;
+    }
+
+    const candidateTurnIndexes: number[] = [];
+    for (let turnIndex = start; turnIndex <= end; turnIndex += 1) {
+      const turn = storedTurns[turnIndex];
+      if (!turn || usedTurnIds.has(turn.turnId)) {
+        continue;
+      }
+      const storedFingerprint = getStoredTurnFingerprint(turn);
+      if (storedFingerprint.toolOnly !== item.fingerprint.toolOnly) {
+        continue;
+      }
+      candidateTurnIndexes.push(turnIndex);
+      if (candidateTurnIndexes.length > 1) {
+        break;
+      }
+    }
+
+    if (candidateTurnIndexes.length !== 1) {
+      continue;
+    }
+
+    const turnIndex = candidateTurnIndexes[0];
+    if (turnIndex === undefined) {
+      continue;
+    }
+    const turn = storedTurns[turnIndex];
+    if (!turn) {
+      continue;
+    }
+
+    existingMatches.set(item.messageIndex, {
+      turn,
+      turnIndex,
+      strategy: "tool-only-fingerprint"
+    });
+    usedTurnIds.add(turn.turnId);
+  }
+}
+
+function matchToolShapeOnlyCandidates(
+  incoming: IncomingAssistantMessage[],
+  storedTurns: AssistantTurn[],
+  existingMatches: Map<number, MatchedTurnCandidate>
+): void {
+  const usedTurnIds = new Set([...existingMatches.values()].map((item) => item.turn.turnId));
+
+  for (const item of incoming) {
+    if (existingMatches.has(item.messageIndex) || !item.message.tool_calls?.length) {
+      continue;
+    }
+
+    const { start, end } = getSearchWindow(incoming, existingMatches, item.assistantOrder, storedTurns.length - 1);
+    if (start > end) {
+      continue;
+    }
+
+    const candidateTurnIndexes: number[] = [];
+    for (let turnIndex = start; turnIndex <= end; turnIndex += 1) {
+      const turn = storedTurns[turnIndex];
+      if (!turn || usedTurnIds.has(turn.turnId)) {
+        continue;
+      }
+      const storedFingerprint = getStoredTurnFingerprint(turn);
+      if (storedFingerprint.toolShapeOnly !== item.fingerprint.toolShapeOnly) {
+        continue;
+      }
+      candidateTurnIndexes.push(turnIndex);
+      if (candidateTurnIndexes.length > 1) {
+        break;
+      }
+    }
+
+    if (candidateTurnIndexes.length !== 1) {
+      continue;
+    }
+
+    const turnIndex = candidateTurnIndexes[0];
+    if (turnIndex === undefined) {
+      continue;
+    }
+    const turn = storedTurns[turnIndex];
+    if (!turn) {
+      continue;
+    }
+
+    existingMatches.set(item.messageIndex, {
+      turn,
+      turnIndex,
+      strategy: "tool-shape-fingerprint"
+    });
+    usedTurnIds.add(turn.turnId);
+  }
+}
+
 export function repairMessages(messages: ChatMessage[], session?: SessionRecord): RepairResult {
   if (!session?.turns.length) {
     return {
@@ -202,6 +312,8 @@ export function repairMessages(messages: ChatMessage[], session?: SessionRecord)
   matchFingerprintCandidates(incomingAssistants, session.turns, matchedTurns, "strict");
   matchFingerprintCandidates(incomingAssistants, session.turns, matchedTurns, "loose");
   matchContentOnlyCandidates(incomingAssistants, session.turns, matchedTurns);
+  matchToolOnlyCandidates(incomingAssistants, session.turns, matchedTurns);
+  matchToolShapeOnlyCandidates(incomingAssistants, session.turns, matchedTurns);
 
   const repairedMessages = messages.map((message) => ({ ...message }));
   const matches: RepairMatch[] = [];

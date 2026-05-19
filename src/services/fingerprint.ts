@@ -6,10 +6,20 @@ export function buildMessageFingerprint(message: AssistantMessageSnapshot): Mess
   const content = normalizeText(message.content);
   const strictToolCalls = canonicalJson(normalizeToolCalls(message.tool_calls, true));
   const looseToolCalls = canonicalJson(normalizeToolCalls(message.tool_calls, false));
+  const toolShapeOnly = canonicalJson(
+    (message.tool_calls ?? []).map((toolCall) => ({
+      type: toolCall.type ?? null,
+      function: {
+        name: toolCall.function?.name ?? null
+      }
+    }))
+  );
 
   return {
     strict: sha256(JSON.stringify({ content, toolCalls: strictToolCalls })),
     loose: sha256(JSON.stringify({ content, toolCalls: looseToolCalls })),
-    contentOnly: sha256(content)
+    contentOnly: sha256(content),
+    toolOnly: sha256(looseToolCalls),
+    toolShapeOnly: sha256(toolShapeOnly)
   };
 }

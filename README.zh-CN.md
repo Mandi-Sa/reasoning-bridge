@@ -22,6 +22,7 @@ Reasoning Bridge 是一个面向 OpenAI 风格聊天客户端的兼容代理，�
 - 支持 `stream: true` 流式透传，并旁路组装最终 assistant 响应
 - 支持 `memory`、`sqlite`、`redis` 三种会话存储
 - 支持基于容量的 LRU 风格清理
+- 支持分层匹配修复：严格指纹、宽松指纹、仅内容、仅工具调用等回退策略
 - 提供基础健康检查和调试接口
 - 支持 SQLite 到 Redis 的迁移
 - 支持 Redis 到 SQLite 的迁移

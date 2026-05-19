@@ -43,6 +43,8 @@ export interface MessageFingerprint {
   strict: string;
   loose: string;
   contentOnly: string;
+  toolOnly: string;
+  toolShapeOnly: string;
 }
 
 export interface AssistantTurn {
@@ -78,7 +80,12 @@ export interface SessionRecord {
 export interface RepairMatch {
   messageIndex: number;
   turnId: string;
-  strategy: "strict-fingerprint" | "loose-fingerprint" | "content-only-fingerprint";
+  strategy:
+    | "strict-fingerprint"
+    | "loose-fingerprint"
+    | "content-only-fingerprint"
+    | "tool-only-fingerprint"
+    | "tool-shape-fingerprint";
   filledReasoning: boolean;
 }
 

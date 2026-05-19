@@ -246,6 +246,16 @@ function scoreSession(body: ChatCompletionRequest, session: SessionRecord): Sess
       matchedTurns += 1;
       continue;
     }
+    if (storedFingerprint.toolOnly === incoming.fingerprint.toolOnly) {
+      score += 5;
+      matchedTurns += 1;
+      continue;
+    }
+    if (storedFingerprint.toolShapeOnly === incoming.fingerprint.toolShapeOnly) {
+      score += 3;
+      matchedTurns += 1;
+      continue;
+    }
 
     const incomingContent = normalizeText(incoming.message.content);
     const storedContent = normalizeText(stored.message.content);
