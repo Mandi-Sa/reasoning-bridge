@@ -706,7 +706,8 @@ async function start(): Promise<void> {
         }
       }
 
-      if (!resolved && config.allowCrossNamespaceRecovery && isRecentFallbackEligible(workingBody)) {
+      let recentFallbackRequiresCrossNamespaceReview = false;
+      if (( !resolved || recentFallbackRequiresCrossNamespaceReview) && config.allowCrossNamespaceRecovery && isRecentFallbackEligible(workingBody)) {
         const allRecentSessions = await store.listRecent(config.recentFallbackLimit);
         const crossNamespaceSessions = allRecentSessions.filter((session) =>
           !session.sessionKey.startsWith(`${downstreamNamespace.namespaceKey}:`)
@@ -729,6 +730,7 @@ async function start(): Promise<void> {
               source: crossNamespaceFallback.source
             };
             resolvedBy = crossNamespaceFallback.source;
+            recentFallbackRequiresCrossNamespaceReview = false;
           }
         }
       }
@@ -745,6 +747,37 @@ async function start(): Promise<void> {
 
       let session = resolvedBy === "created" ? undefined : await store.get(resolvedSession.sessionKey);
       let previewRepairResult = repairMessages(workingBody.messages, session);
+
+      if (resolvedBy === "recent-fallback" && resolved && previewRepairResult.matches.length <= 0) {
+        recentFallbackRequiresCrossNamespaceReview = true;
+      }
+
+      if (recentFallbackRequiresCrossNamespaceReview && config.allowCrossNamespaceRecovery && isRecentFallbackEligible(workingBody)) {
+        const allRecentSessions = await store.listRecent(config.recentFallbackLimit);
+        const crossNamespaceSessions = allRecentSessions.filter((item) =>
+          !item.sessionKey.startsWith(`${downstreamNamespace.namespaceKey}:`)
+        );
+        const crossNamespaceFallback = findBestSessionCandidate(
+          { body: workingBody, headers: request.headers },
+          crossNamespaceSessions,
+          "cross-namespace-fallback"
+        );
+        if (
+          crossNamespaceFallback &&
+          crossNamespaceFallback.score >= config.crossNamespaceMinScore &&
+          (crossNamespaceFallback.candidateCount <= 1 || crossNamespaceFallback.scoreGap >= config.crossNamespaceMinMargin)
+        ) {
+          resolved = {
+            sessionKey: crossNamespaceFallback.sessionKey,
+            anchorKey: crossNamespaceFallback.anchorKey,
+            source: crossNamespaceFallback.source
+          };
+          resolvedBy = crossNamespaceFallback.source;
+          bestCandidate = crossNamespaceFallback;
+          session = await store.get(crossNamespaceFallback.sessionKey);
+          previewRepairResult = repairMessages(workingBody.messages, session);
+        }
+      }
 
       if (
         shouldIsolateMismatchedInferredSession(workingBody, resolvedBy, previewRepairResult.matches.length)
