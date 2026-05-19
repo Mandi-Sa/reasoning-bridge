@@ -135,7 +135,8 @@ function summarizeErrorBody(status: number, bodyText: string): string {
 
 function copyUpstreamHeaders(upstream: Response, reply: FastifyReply): void {
   for (const [key, value] of upstream.headers.entries()) {
-    if (key.toLowerCase() === "transfer-encoding") {
+    const normalizedKey = key.toLowerCase();
+    if (normalizedKey === "transfer-encoding" || normalizedKey === "content-length") {
       continue;
     }
     reply.header(key, value);
