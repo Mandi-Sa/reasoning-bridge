@@ -47,11 +47,36 @@ function summarizeSessions(sessions: SessionRecord[]): Pick<StoreStatsSnapshot, 
   });
 }
 
+class SessionMutationLocks {
+  private readonly tails = new Map<string, Promise<void>>();
+
+  async run<T>(sessionKey: string, action: () => Promise<T> | T): Promise<T> {
+    const previous = this.tails.get(sessionKey) ?? Promise.resolve();
+    let release: () => void = () => undefined;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const next = previous.catch(() => undefined).then(() => current);
+    this.tails.set(sessionKey, next);
+
+    await previous.catch(() => undefined);
+    try {
+      return await action();
+    } finally {
+      release();
+      if (this.tails.get(sessionKey) === next) {
+        this.tails.delete(sessionKey);
+      }
+    }
+  }
+}
+
 export class InMemorySessionStore implements SessionStore {
   private readonly sessions = new Map<string, SessionRecord>();
   private readonly anchorIndex = new Map<string, Set<string>>();
   private readonly bootstrapIndex = new Map<string, Set<string>>();
   private readonly limits: SessionStoreLimits;
+  private readonly locks = new SessionMutationLocks();
 
   constructor(limits: SessionStoreLimits) {
     this.limits = limits;
@@ -62,18 +87,22 @@ export class InMemorySessionStore implements SessionStore {
   }
 
   async set(session: SessionRecord): Promise<void> {
-    this.sessions.set(session.sessionKey, this.normalizeSession(session));
-    await this.rebuildIndexesForSession(session.sessionKey);
-    await this.pruneToLimits();
+    await this.locks.run(session.sessionKey, async () => {
+      this.sessions.set(session.sessionKey, this.normalizeSession(session));
+      await this.rebuildIndexesForSession(session.sessionKey);
+      await this.pruneToLimits();
+    });
   }
 
   async touch(sessionKey: string): Promise<SessionRecord | undefined> {
-    const session = this.sessions.get(sessionKey);
-    if (!session) {
-      return undefined;
-    }
-    session.updatedAt = Date.now();
-    return session;
+    return this.locks.run(sessionKey, () => {
+      const session = this.sessions.get(sessionKey);
+      if (!session) {
+        return undefined;
+      }
+      session.updatedAt = Date.now();
+      return session;
+    });
   }
 
   async listByAnchor(anchorKey: string): Promise<SessionRecord[]> {
@@ -105,65 +134,75 @@ export class InMemorySessionStore implements SessionStore {
   }
 
   async setBootstrapKey(sessionKey: string, bootstrapKey: string): Promise<void> {
-    const session = this.sessions.get(sessionKey);
-    if (!session) {
-      return;
-    }
-    session.bootstrapKey = bootstrapKey;
-    await this.rebuildIndexesForSession(sessionKey);
+    await this.locks.run(sessionKey, async () => {
+      const session = this.sessions.get(sessionKey);
+      if (!session) {
+        return;
+      }
+      session.bootstrapKey = bootstrapKey;
+      await this.rebuildIndexesForSession(sessionKey);
+    });
   }
 
   async addContextKey(sessionKey: string, contextKey: string): Promise<void> {
-    const session = this.sessions.get(sessionKey);
-    if (!session) {
-      return;
-    }
-    if (!session.contextKeys.includes(contextKey)) {
-      session.contextKeys.push(contextKey);
-      session.contextKeys = session.contextKeys.slice(-16);
-      await this.rebuildIndexesForSession(sessionKey);
-    }
+    await this.locks.run(sessionKey, async () => {
+      const session = this.sessions.get(sessionKey);
+      if (!session) {
+        return;
+      }
+      if (!session.contextKeys.includes(contextKey)) {
+        session.contextKeys.push(contextKey);
+        session.contextKeys = session.contextKeys.slice(-16);
+        await this.rebuildIndexesForSession(sessionKey);
+      }
+    });
   }
 
   async appendTurn(sessionKey: string, turn: AssistantTurn): Promise<boolean> {
-    const session = this.sessions.get(sessionKey);
-    if (!session) {
-      return false;
-    }
+    return this.locks.run(sessionKey, () => {
+      const session = this.sessions.get(sessionKey);
+      if (!session) {
+        return false;
+      }
 
-    const exists = session.turns.some((existing) =>
-      existing.turnId === turn.turnId ||
-      (existing.requestHash === turn.requestHash && existing.fingerprint.strict === turn.fingerprint.strict)
-    );
-    if (exists) {
-      return false;
-    }
+      const exists = session.turns.some((existing) =>
+        existing.turnId === turn.turnId ||
+        (existing.requestHash === turn.requestHash && existing.fingerprint.strict === turn.fingerprint.strict)
+      );
+      if (exists) {
+        return false;
+      }
 
-    session.turns.push(turn);
-    session.turns = session.turns.slice(-this.limits.maxTurnsPerSession);
-    session.updatedAt = Date.now();
-    return true;
+      session.turns.push(turn);
+      session.turns = session.turns.slice(-this.limits.maxTurnsPerSession);
+      session.updatedAt = Date.now();
+      return true;
+    });
   }
 
   async markInflight(sessionKey: string, inflight: InflightRequestRecord): Promise<void> {
-    const session = this.sessions.get(sessionKey);
-    if (!session) {
-      return;
-    }
-    const exists = session.inflightRequests.some((item) => item.requestHash === inflight.requestHash);
-    if (!exists) {
-      session.inflightRequests.push(inflight);
-    }
-    session.requestHashes = [inflight.requestHash, ...session.requestHashes.filter((value) => value !== inflight.requestHash)].slice(0, 64);
-    session.updatedAt = Date.now();
+    await this.locks.run(sessionKey, () => {
+      const session = this.sessions.get(sessionKey);
+      if (!session) {
+        return;
+      }
+      const exists = session.inflightRequests.some((item) => item.requestHash === inflight.requestHash);
+      if (!exists) {
+        session.inflightRequests.push(inflight);
+      }
+      session.requestHashes = [inflight.requestHash, ...session.requestHashes.filter((value) => value !== inflight.requestHash)].slice(0, 64);
+      session.updatedAt = Date.now();
+    });
   }
 
   async clearInflight(sessionKey: string, requestHash: string): Promise<void> {
-    const session = this.sessions.get(sessionKey);
-    if (!session) {
-      return;
-    }
-    session.inflightRequests = session.inflightRequests.filter((item) => item.requestHash !== requestHash);
+    await this.locks.run(sessionKey, () => {
+      const session = this.sessions.get(sessionKey);
+      if (!session) {
+        return;
+      }
+      session.inflightRequests = session.inflightRequests.filter((item) => item.requestHash !== requestHash);
+    });
   }
 
   async cleanup(): Promise<void> {
@@ -245,6 +284,7 @@ export class SqliteSessionStore implements SessionStore {
   private readonly db: DatabaseSync;
   private readonly filePath: string;
   private readonly limits: SessionStoreLimits;
+  private readonly locks = new SessionMutationLocks();
 
   constructor(filePath: string, limits: SessionStoreLimits) {
     const resolvedPath = resolve(filePath);
@@ -285,17 +325,19 @@ export class SqliteSessionStore implements SessionStore {
   }
 
   async set(session: SessionRecord): Promise<void> {
-    this.persistSession(session);
+    await this.locks.run(session.sessionKey, () => this.persistSession(session));
   }
 
   async touch(sessionKey: string): Promise<SessionRecord | undefined> {
-    const session = await this.get(sessionKey);
-    if (!session) {
-      return undefined;
-    }
-    session.updatedAt = Date.now();
-    this.persistSession(session);
-    return session;
+    return this.locks.run(sessionKey, async () => {
+      const session = await this.get(sessionKey);
+      if (!session) {
+        return undefined;
+      }
+      session.updatedAt = Date.now();
+      this.persistSession(session);
+      return session;
+    });
   }
 
   async listByAnchor(anchorKey: string): Promise<SessionRecord[]> {
@@ -330,66 +372,76 @@ export class SqliteSessionStore implements SessionStore {
   }
 
   async setBootstrapKey(sessionKey: string, bootstrapKey: string): Promise<void> {
-    const session = await this.get(sessionKey);
-    if (!session) {
-      return;
-    }
-    session.bootstrapKey = bootstrapKey;
-    this.persistSession(session);
+    await this.locks.run(sessionKey, async () => {
+      const session = await this.get(sessionKey);
+      if (!session) {
+        return;
+      }
+      session.bootstrapKey = bootstrapKey;
+      this.persistSession(session);
+    });
   }
 
   async addContextKey(sessionKey: string, contextKey: string): Promise<void> {
-    const session = await this.get(sessionKey);
-    if (!session) {
-      return;
-    }
-    if (!session.contextKeys.includes(contextKey)) {
-      session.contextKeys.push(contextKey);
-      session.contextKeys = session.contextKeys.slice(-16);
-      this.persistSession(session);
-    }
+    await this.locks.run(sessionKey, async () => {
+      const session = await this.get(sessionKey);
+      if (!session) {
+        return;
+      }
+      if (!session.contextKeys.includes(contextKey)) {
+        session.contextKeys.push(contextKey);
+        session.contextKeys = session.contextKeys.slice(-16);
+        this.persistSession(session);
+      }
+    });
   }
 
   async appendTurn(sessionKey: string, turn: AssistantTurn): Promise<boolean> {
-    const session = await this.get(sessionKey);
-    if (!session) {
-      return false;
-    }
-    const exists = session.turns.some((existing) =>
-      existing.turnId === turn.turnId ||
-      (existing.requestHash === turn.requestHash && existing.fingerprint.strict === turn.fingerprint.strict)
-    );
-    if (exists) {
-      return false;
-    }
-    session.turns.push(turn);
-    session.turns = session.turns.slice(-this.limits.maxTurnsPerSession);
-    session.updatedAt = Date.now();
-    this.persistSession(session);
-    return true;
+    return this.locks.run(sessionKey, async () => {
+      const session = await this.get(sessionKey);
+      if (!session) {
+        return false;
+      }
+      const exists = session.turns.some((existing) =>
+        existing.turnId === turn.turnId ||
+        (existing.requestHash === turn.requestHash && existing.fingerprint.strict === turn.fingerprint.strict)
+      );
+      if (exists) {
+        return false;
+      }
+      session.turns.push(turn);
+      session.turns = session.turns.slice(-this.limits.maxTurnsPerSession);
+      session.updatedAt = Date.now();
+      this.persistSession(session);
+      return true;
+    });
   }
 
   async markInflight(sessionKey: string, inflight: InflightRequestRecord): Promise<void> {
-    const session = await this.get(sessionKey);
-    if (!session) {
-      return;
-    }
-    const exists = session.inflightRequests.some((item) => item.requestHash === inflight.requestHash);
-    if (!exists) {
-      session.inflightRequests.push(inflight);
-    }
-    session.requestHashes = [inflight.requestHash, ...session.requestHashes.filter((value) => value !== inflight.requestHash)].slice(0, 64);
-    session.updatedAt = Date.now();
-    this.persistSession(session);
+    await this.locks.run(sessionKey, async () => {
+      const session = await this.get(sessionKey);
+      if (!session) {
+        return;
+      }
+      const exists = session.inflightRequests.some((item) => item.requestHash === inflight.requestHash);
+      if (!exists) {
+        session.inflightRequests.push(inflight);
+      }
+      session.requestHashes = [inflight.requestHash, ...session.requestHashes.filter((value) => value !== inflight.requestHash)].slice(0, 64);
+      session.updatedAt = Date.now();
+      this.persistSession(session);
+    });
   }
 
   async clearInflight(sessionKey: string, requestHash: string): Promise<void> {
-    const session = await this.get(sessionKey);
-    if (!session) {
-      return;
-    }
-    session.inflightRequests = session.inflightRequests.filter((item) => item.requestHash !== requestHash);
-    this.persistSession(session);
+    await this.locks.run(sessionKey, async () => {
+      const session = await this.get(sessionKey);
+      if (!session) {
+        return;
+      }
+      session.inflightRequests = session.inflightRequests.filter((item) => item.requestHash !== requestHash);
+      this.persistSession(session);
+    });
   }
 
   async cleanup(): Promise<void> {
@@ -546,6 +598,7 @@ export class RedisSessionStore implements SessionStore {
   private readonly prefix: string;
   private readonly limits: SessionStoreLimits;
   private readonly ready: Promise<void>;
+  private readonly locks = new SessionMutationLocks();
 
   constructor(redisUrl: string, keyPrefix: string, limits: SessionStoreLimits) {
     this.client = createClient({ url: redisUrl });
@@ -562,17 +615,19 @@ export class RedisSessionStore implements SessionStore {
 
   async set(session: SessionRecord): Promise<void> {
     await this.ready;
-    await this.persistSession(session);
+    await this.locks.run(session.sessionKey, () => this.persistSession(session));
   }
 
   async touch(sessionKey: string): Promise<SessionRecord | undefined> {
-    const session = await this.get(sessionKey);
-    if (!session) {
-      return undefined;
-    }
-    session.updatedAt = Date.now();
-    await this.persistSession(session);
-    return session;
+    return this.locks.run(sessionKey, async () => {
+      const session = await this.get(sessionKey);
+      if (!session) {
+        return undefined;
+      }
+      session.updatedAt = Date.now();
+      await this.persistSession(session);
+      return session;
+    });
   }
 
   async listByAnchor(anchorKey: string): Promise<SessionRecord[]> {
@@ -594,66 +649,76 @@ export class RedisSessionStore implements SessionStore {
   }
 
   async setBootstrapKey(sessionKey: string, bootstrapKey: string): Promise<void> {
-    const session = await this.get(sessionKey);
-    if (!session) {
-      return;
-    }
-    session.bootstrapKey = bootstrapKey;
-    await this.persistSession(session);
+    await this.locks.run(sessionKey, async () => {
+      const session = await this.get(sessionKey);
+      if (!session) {
+        return;
+      }
+      session.bootstrapKey = bootstrapKey;
+      await this.persistSession(session);
+    });
   }
 
   async addContextKey(sessionKey: string, contextKey: string): Promise<void> {
-    const session = await this.get(sessionKey);
-    if (!session) {
-      return;
-    }
-    if (!session.contextKeys.includes(contextKey)) {
-      session.contextKeys.push(contextKey);
-      session.contextKeys = session.contextKeys.slice(-16);
-      await this.persistSession(session);
-    }
+    await this.locks.run(sessionKey, async () => {
+      const session = await this.get(sessionKey);
+      if (!session) {
+        return;
+      }
+      if (!session.contextKeys.includes(contextKey)) {
+        session.contextKeys.push(contextKey);
+        session.contextKeys = session.contextKeys.slice(-16);
+        await this.persistSession(session);
+      }
+    });
   }
 
   async appendTurn(sessionKey: string, turn: AssistantTurn): Promise<boolean> {
-    const session = await this.get(sessionKey);
-    if (!session) {
-      return false;
-    }
-    const exists = session.turns.some((existing) =>
-      existing.turnId === turn.turnId ||
-      (existing.requestHash === turn.requestHash && existing.fingerprint.strict === turn.fingerprint.strict)
-    );
-    if (exists) {
-      return false;
-    }
-    session.turns.push(turn);
-    session.turns = session.turns.slice(-this.limits.maxTurnsPerSession);
-    session.updatedAt = Date.now();
-    await this.persistSession(session);
-    return true;
+    return this.locks.run(sessionKey, async () => {
+      const session = await this.get(sessionKey);
+      if (!session) {
+        return false;
+      }
+      const exists = session.turns.some((existing) =>
+        existing.turnId === turn.turnId ||
+        (existing.requestHash === turn.requestHash && existing.fingerprint.strict === turn.fingerprint.strict)
+      );
+      if (exists) {
+        return false;
+      }
+      session.turns.push(turn);
+      session.turns = session.turns.slice(-this.limits.maxTurnsPerSession);
+      session.updatedAt = Date.now();
+      await this.persistSession(session);
+      return true;
+    });
   }
 
   async markInflight(sessionKey: string, inflight: InflightRequestRecord): Promise<void> {
-    const session = await this.get(sessionKey);
-    if (!session) {
-      return;
-    }
-    const exists = session.inflightRequests.some((item) => item.requestHash === inflight.requestHash);
-    if (!exists) {
-      session.inflightRequests.push(inflight);
-    }
-    session.requestHashes = [inflight.requestHash, ...session.requestHashes.filter((value) => value !== inflight.requestHash)].slice(0, 64);
-    session.updatedAt = Date.now();
-    await this.persistSession(session);
+    await this.locks.run(sessionKey, async () => {
+      const session = await this.get(sessionKey);
+      if (!session) {
+        return;
+      }
+      const exists = session.inflightRequests.some((item) => item.requestHash === inflight.requestHash);
+      if (!exists) {
+        session.inflightRequests.push(inflight);
+      }
+      session.requestHashes = [inflight.requestHash, ...session.requestHashes.filter((value) => value !== inflight.requestHash)].slice(0, 64);
+      session.updatedAt = Date.now();
+      await this.persistSession(session);
+    });
   }
 
   async clearInflight(sessionKey: string, requestHash: string): Promise<void> {
-    const session = await this.get(sessionKey);
-    if (!session) {
-      return;
-    }
-    session.inflightRequests = session.inflightRequests.filter((item) => item.requestHash !== requestHash);
-    await this.persistSession(session);
+    await this.locks.run(sessionKey, async () => {
+      const session = await this.get(sessionKey);
+      if (!session) {
+        return;
+      }
+      session.inflightRequests = session.inflightRequests.filter((item) => item.requestHash !== requestHash);
+      await this.persistSession(session);
+    });
   }
 
   async cleanup(): Promise<void> {
