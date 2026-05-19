@@ -332,6 +332,35 @@ async function forwardToUpstreamWithHeaders(
   }
 }
 
+async function forwardGetToUpstreamWithHeaders(
+  upstreamPath: string,
+  requestHeaders: Record<string, string | string[] | undefined>,
+  requestIp: string
+): Promise<UpstreamResponseHandle> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), config.requestTimeoutMs);
+  let cleaned = false;
+  const cleanup = (): void => {
+    if (cleaned) {
+      return;
+    }
+    cleaned = true;
+    clearTimeout(timer);
+  };
+
+  try {
+    const response = await fetch(`${config.upstreamBaseUrl}${upstreamPath}`, {
+      method: "GET",
+      headers: buildForwardHeaders(requestHeaders, requestIp, config.upstreamApiKey),
+      signal: controller.signal
+    });
+    return { response, cleanup };
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
+}
+
 function upstreamFetchErrorStatus(error: unknown): number {
   return isAbortError(error) ? 504 : 502;
 }
@@ -643,6 +672,59 @@ async function start(): Promise<void> {
       ok: true,
       store: await store.getStats(limit)
     };
+  });
+
+  app.get("/v1/models", async (request: FastifyRequest, reply: FastifyReply) => {
+    let upstreamHandle: UpstreamResponseHandle;
+    const search = request.url.includes("?")
+      ? request.url.slice(request.url.indexOf("?"))
+      : "";
+
+    try {
+      upstreamHandle = await forwardGetToUpstreamWithHeaders(
+        `/v1/models${search}`,
+        request.headers,
+        request.ip
+      );
+    } catch (error) {
+      const status = upstreamFetchErrorStatus(error);
+      if (status === 504) {
+        metrics.recordUpstreamTimeout();
+      }
+      return reply.code(status).send({
+        error: {
+          code: "upstream_unavailable",
+          message: error instanceof Error ? error.message : "unknown upstream error"
+        }
+      });
+    }
+
+    const { response: upstream, cleanup } = upstreamHandle;
+    copyUpstreamHeaders(upstream, reply);
+    metrics.recordUpstreamStatus(upstream.status);
+
+    let rawText: string;
+    try {
+      rawText = await upstream.text();
+    } catch (error) {
+      cleanup();
+      const status = upstreamFetchErrorStatus(error);
+      if (status === 504) {
+        metrics.recordUpstreamTimeout();
+      }
+      return reply.code(status).send({
+        error: {
+          code: "upstream_unavailable",
+          message: error instanceof Error ? error.message : "unknown upstream error"
+        }
+      });
+    }
+
+    cleanup();
+    return reply
+      .code(upstream.status)
+      .type(upstream.headers.get("content-type") ?? "application/json")
+      .send(rawText);
   });
 
   app.post("/v1/chat/completions", async (request: FastifyRequest, reply: FastifyReply) => {
