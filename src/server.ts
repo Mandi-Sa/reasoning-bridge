@@ -227,6 +227,16 @@ function parseSseEventData(rawEvent: string): string[] {
     .map((line) => line.slice(5).trim());
 }
 
+function isAbortError(error: unknown): boolean {
+  if (error instanceof DOMException && error.name === "AbortError") {
+    return true;
+  }
+  if (error instanceof Error) {
+    return error.name === "AbortError" || error.message.toLowerCase().includes("aborted");
+  }
+  return false;
+}
+
 async function proxyStream(
   reply: FastifyReply,
   upstream: Response,
@@ -269,7 +279,12 @@ async function proxyStream(
   reply.raw.end();
 }
 
-async function forwardToUpstream(body: JsonObject): Promise<Response> {
+interface UpstreamResponseHandle {
+  response: Response;
+  cleanup: () => void;
+}
+
+async function forwardToUpstream(body: JsonObject): Promise<UpstreamResponseHandle> {
   return forwardToUpstreamWithHeaders(body, {}, "127.0.0.1");
 }
 
@@ -277,20 +292,57 @@ async function forwardToUpstreamWithHeaders(
   body: JsonObject,
   requestHeaders: Record<string, string | string[] | undefined>,
   requestIp: string
-): Promise<Response> {
+): Promise<UpstreamResponseHandle> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), config.requestTimeoutMs);
+  let cleaned = false;
+  const cleanup = (): void => {
+    if (cleaned) {
+      return;
+    }
+    cleaned = true;
+    clearTimeout(timer);
+  };
 
   try {
-    return await fetch(`${config.upstreamBaseUrl}${config.upstreamPath}`, {
+    const response = await fetch(`${config.upstreamBaseUrl}${config.upstreamPath}`, {
       method: "POST",
       headers: buildForwardHeaders(requestHeaders, requestIp, config.upstreamApiKey),
       body: JSON.stringify(body),
       signal: controller.signal
     });
-  } finally {
-    clearTimeout(timer);
+    return { response, cleanup };
+  } catch (error) {
+    cleanup();
+    throw error;
   }
+}
+
+function upstreamFetchErrorStatus(error: unknown): number {
+  return isAbortError(error) ? 504 : 502;
+}
+
+async function sendUpstreamReadError(
+  reply: FastifyReply,
+  error: unknown,
+  sessionKey: string,
+  requestHash: string,
+  store: Awaited<ReturnType<typeof createSessionStore>>,
+  closeRequest: (nextOutcome: "success" | "failure") => void
+): Promise<void> {
+  await store.clearInflight(sessionKey, requestHash);
+  const message = error instanceof Error ? error.message : "unknown upstream error";
+  const status = upstreamFetchErrorStatus(error);
+  if (status === 504) {
+    metrics.recordUpstreamTimeout();
+  }
+  closeRequest("failure");
+  reply.code(status).send({
+    error: {
+      code: "upstream_unavailable",
+      message
+    }
+  });
 }
 
 function buildWarningHeaders(missingAssistantIndexes: number[], reply: FastifyReply): void {
@@ -599,28 +651,18 @@ async function start(): Promise<void> {
         }, "request body details");
       }
 
-      let upstream: Response;
+      let upstreamHandle: UpstreamResponseHandle;
       try {
-        upstream = await forwardToUpstreamWithHeaders(
+        upstreamHandle = await forwardToUpstreamWithHeaders(
           repairedBody,
           request.headers,
           request.ip
         );
       } catch (error) {
-        await store.clearInflight(session.sessionKey, requestHash);
-        const message = error instanceof Error ? error.message : "unknown upstream error";
-        const status = message.includes("aborted") ? 504 : 502;
-        if (status === 504) {
-          metrics.recordUpstreamTimeout();
-        }
-        closeRequest("failure");
-        return reply.code(status).send({
-          error: {
-            code: "upstream_unavailable",
-            message
-          }
-        });
+        await sendUpstreamReadError(reply, error, session.sessionKey, requestHash, store, closeRequest);
+        return;
       }
+      const { response: upstream, cleanup: cleanupUpstream } = upstreamHandle;
 
       copyUpstreamHeaders(upstream, reply);
       metrics.recordUpstreamStatus(upstream.status);
@@ -635,7 +677,15 @@ async function start(): Promise<void> {
       reply.header("x-reasoning-bridge-request-model", repairedBody.model);
 
       if (!upstream.ok) {
-        const errorBody = await upstream.text();
+        let errorBody: string;
+        try {
+          errorBody = await upstream.text();
+        } catch (error) {
+          cleanupUpstream();
+          await sendUpstreamReadError(reply, error, session.sessionKey, requestHash, store, closeRequest);
+          return;
+        }
+        cleanupUpstream();
         await store.clearInflight(session.sessionKey, requestHash);
         closeRequest("failure");
         return reply.code(upstream.status).send({
@@ -654,14 +704,22 @@ async function start(): Promise<void> {
 
         try {
           await proxyStream(reply, upstream, (data) => consumeSseEvent(assembler, data));
+          cleanupUpstream();
           const assistantMessage = finalizeStreamAssistantMessage(assembler);
           if (assistantMessage) {
             await saveAssistantTurn(session.sessionKey, requestHash, assembler.responseId, repairedBody.messages, assistantMessage, store);
           }
           outcome = "success";
         } catch (error) {
+          cleanupUpstream();
           request.log.error({ err: error }, "stream proxy failed");
+          if (isAbortError(error)) {
+            metrics.recordUpstreamTimeout();
+          }
           metrics.recordStreamInterruption();
+          if (!reply.raw.destroyed && !reply.raw.writableEnded) {
+            reply.raw.end();
+          }
         } finally {
           await store.clearInflight(session.sessionKey, requestHash);
           closeRequest(outcome);
@@ -669,7 +727,15 @@ async function start(): Promise<void> {
         return;
       }
 
-      const rawText = await upstream.text();
+      let rawText: string;
+      try {
+        rawText = await upstream.text();
+      } catch (error) {
+        cleanupUpstream();
+        await sendUpstreamReadError(reply, error, session.sessionKey, requestHash, store, closeRequest);
+        return;
+      }
+      cleanupUpstream();
       await store.clearInflight(session.sessionKey, requestHash);
 
       let parsed: unknown;
