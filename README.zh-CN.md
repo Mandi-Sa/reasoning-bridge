@@ -86,6 +86,9 @@ npm start
   "sessionMatchMinMargin": 3,
   "lowConfidenceStrategy": "disable-thinking",
   "forceInjectReasoningEffortNone": true,
+  "namespaceIncludeAuthorization": true,
+  "namespaceIncludeUserAgent": true,
+  "namespaceIncludeIp": false,
   "sessionStoreDriver": "sqlite",
   "sessionStoreFilePath": "./data/sessions.sqlite",
   "redisUrl": "redis://127.0.0.1:6379/12",
@@ -112,6 +115,9 @@ npm start
 - `sessionMatchMinMargin`：多个候选会话竞争时，第一名相对第二名至少要领先的分数
 - `lowConfidenceStrategy`：可选 `warn`、`disable-thinking`、`reject`
 - `forceInjectReasoningEffortNone`：默认为 `true`。当推理修复失败且客户端请求本身没有显式思考开关时，桥接器会主动注入 `reasoning_effort: "none"` 再转发
+- `namespaceIncludeAuthorization`：是否把下游 `Authorization` 纳入 namespace 计算
+- `namespaceIncludeUserAgent`：是否把下游 `User-Agent` 纳入 namespace 计算
+- `namespaceIncludeIp`：是否把下游 IP 纳入 namespace 计算。默认 `false`，因为 CDN、反代、CGNAT 后的 IP 往往不稳定
 - `sessionStoreDriver`：可选 `memory`、`sqlite`、`redis`
 - `sessionStoreFilePath`：SQLite 文件路径
 - `redisUrl`：Redis 连接地址，可包含 DB 库编号

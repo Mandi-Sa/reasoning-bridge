@@ -16,6 +16,9 @@ export interface BridgeConfig {
   sessionMatchMinMargin: number;
   lowConfidenceStrategy: "warn" | "disable-thinking" | "reject";
   forceInjectReasoningEffortNone: boolean;
+  namespaceIncludeAuthorization: boolean;
+  namespaceIncludeUserAgent: boolean;
+  namespaceIncludeIp: boolean;
   allowUserScopedSessions: boolean;
   sessionStoreDriver: "memory" | "sqlite" | "redis";
   sessionStoreFilePath: string;
@@ -41,6 +44,9 @@ interface BridgeConfigFileShape {
   sessionMatchMinMargin?: number;
   lowConfidenceStrategy?: "warn" | "disable-thinking" | "reject";
   forceInjectReasoningEffortNone?: boolean;
+  namespaceIncludeAuthorization?: boolean;
+  namespaceIncludeUserAgent?: boolean;
+  namespaceIncludeIp?: boolean;
   allowUserScopedSessions?: boolean;
   sessionStoreDriver?: "memory" | "sqlite" | "redis";
   sessionStoreFilePath?: string;
@@ -129,6 +135,9 @@ export function loadConfig(): BridgeConfig {
     sessionMatchMinMargin: readNumber(fileConfig.sessionMatchMinMargin, 3, "sessionMatchMinMargin"),
     lowConfidenceStrategy: readLowConfidenceStrategy(fileConfig.lowConfidenceStrategy),
     forceInjectReasoningEffortNone: fileConfig.forceInjectReasoningEffortNone ?? true,
+    namespaceIncludeAuthorization: fileConfig.namespaceIncludeAuthorization ?? true,
+    namespaceIncludeUserAgent: fileConfig.namespaceIncludeUserAgent ?? true,
+    namespaceIncludeIp: fileConfig.namespaceIncludeIp ?? false,
     allowUserScopedSessions: fileConfig.allowUserScopedSessions ?? false,
     sessionStoreDriver,
     sessionStoreFilePath: fileConfig.sessionStoreFilePath ?? "./data/sessions.sqlite",

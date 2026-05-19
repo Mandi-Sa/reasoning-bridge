@@ -86,6 +86,9 @@ Example `config.example.json`:
   "sessionMatchMinMargin": 3,
   "lowConfidenceStrategy": "disable-thinking",
   "forceInjectReasoningEffortNone": true,
+  "namespaceIncludeAuthorization": true,
+  "namespaceIncludeUserAgent": true,
+  "namespaceIncludeIp": false,
   "allowUserScopedSessions": false,
   "sessionStoreDriver": "sqlite",
   "sessionStoreFilePath": "./data/sessions.sqlite",
@@ -113,6 +116,9 @@ Key fields:
 - `sessionMatchMinMargin`: minimum lead over the runner-up candidate when multiple sessions compete
 - `lowConfidenceStrategy`: `warn`, `disable-thinking`, or `reject`
 - `forceInjectReasoningEffortNone`: when `true`, the bridge injects `reasoning_effort: "none"` by default if reasoning repair fails and the incoming request did not expose an explicit toggle
+- `namespaceIncludeAuthorization`: include downstream `Authorization` in the namespace key
+- `namespaceIncludeUserAgent`: include downstream `User-Agent` in the namespace key
+- `namespaceIncludeIp`: include downstream IP-derived data in the namespace key. Default is `false` because IPs behind CDNs, reverse proxies, or CGNAT are often unstable
 - `allowUserScopedSessions`: when `true`, the bridge may use the request `user` field as an explicit session key. Keep this `false` unless your callers guarantee stable, unique `user` values.
 - `sessionStoreDriver`: `memory`, `sqlite`, or `redis`
 - `sessionStoreFilePath`: SQLite file path

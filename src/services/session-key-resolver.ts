@@ -3,6 +3,7 @@ import { canonicalJson, normalizeText } from "../utils/canonical.js";
 import { sha256 } from "../utils/hash.js";
 import { buildMessageFingerprint } from "./fingerprint.js";
 import { getStoredTurnFingerprint } from "./stored-turn-fingerprint.js";
+import type { BridgeConfig } from "../config.js";
 
 export interface SessionResolutionInput {
   body: ChatCompletionRequest;
@@ -44,7 +45,8 @@ function normalizeToken(value: string | undefined, fallback: string): string {
 
 export function buildDownstreamNamespace(
   headers: Record<string, string | string[] | undefined>,
-  ip: string | undefined
+  ip: string | undefined,
+  options: Pick<BridgeConfig, "namespaceIncludeAuthorization" | "namespaceIncludeUserAgent" | "namespaceIncludeIp">
 ): DownstreamNamespace {
   const authorization = readHeader(headers, "authorization");
   const userAgent = readHeader(headers, "user-agent");
@@ -54,11 +56,19 @@ export function buildDownstreamNamespace(
   const ipValue = normalizeToken(forwardedFor?.split(",")[0] ?? realIp ?? ip, "unknown-ip");
   const uaValue = normalizeToken(userAgent, "unknown-ua");
   const authHash = authorization ? sha256(authorization) : "no-auth";
-  const namespacePayload = {
-    authHash,
-    ip: ipValue,
-    ua: uaValue
-  };
+  const namespacePayload: Record<string, string> = {};
+  if (options.namespaceIncludeAuthorization) {
+    namespacePayload.authHash = authHash;
+  }
+  if (options.namespaceIncludeUserAgent) {
+    namespacePayload.ua = uaValue;
+  }
+  if (options.namespaceIncludeIp) {
+    namespacePayload.ip = ipValue;
+  }
+  if (!Object.keys(namespacePayload).length) {
+    namespacePayload.authHash = authHash;
+  }
 
   return {
     namespaceKey: `ns:${sha256(canonicalJson(namespacePayload))}`,

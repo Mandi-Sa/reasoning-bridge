@@ -628,7 +628,11 @@ async function start(): Promise<void> {
     };
 
     try {
-      const downstreamNamespace = buildDownstreamNamespace(request.headers, request.ip);
+      const downstreamNamespace = buildDownstreamNamespace(request.headers, request.ip, {
+        namespaceIncludeAuthorization: config.namespaceIncludeAuthorization,
+        namespaceIncludeUserAgent: config.namespaceIncludeUserAgent,
+        namespaceIncludeIp: config.namespaceIncludeIp
+      });
       let workingBody = body;
       const rawAnchorKey = buildAnchorKey(workingBody);
       const rawBootstrapKey = buildBootstrapKey(workingBody);
