@@ -418,7 +418,7 @@ export class SqliteSessionStore implements SessionStore {
     return {
       driver: "sqlite",
       sessionCount: countRow.count,
-      estimatedBytes: this.safeFileSize(this.filePath),
+      estimatedBytes: this.safeSqliteTotalSize(),
       inflightCount: totals.inflightCount,
       totalTurns: totals.totalTurns,
       sessionsWithBootstrapKey: totals.sessionsWithBootstrapKey,
@@ -506,7 +506,7 @@ export class SqliteSessionStore implements SessionStore {
       `).run(overflow);
     }
 
-    let sizeBytes = this.safeFileSize(this.filePath);
+    let sizeBytes = this.safeSqliteTotalSize();
     while (sizeBytes > this.limits.maxStoreBytes) {
       const result = this.db.prepare(`
         DELETE FROM sessions
@@ -520,8 +520,16 @@ export class SqliteSessionStore implements SessionStore {
       if ((result.changes ?? 0) === 0) {
         break;
       }
-      sizeBytes = this.safeFileSize(this.filePath);
+      sizeBytes = this.safeSqliteTotalSize();
     }
+  }
+
+  private safeSqliteTotalSize(): number {
+    return [
+      this.filePath,
+      `${this.filePath}-wal`,
+      `${this.filePath}-shm`
+    ].reduce((total, filePath) => total + this.safeFileSize(filePath), 0);
   }
 
   private safeFileSize(filePath: string): number {
