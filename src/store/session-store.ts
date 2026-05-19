@@ -7,6 +7,7 @@ import type { AssistantTurn, InflightRequestRecord, SessionRecord, StoreStatsSna
 export interface SessionStore {
   get(sessionKey: string): Promise<SessionRecord | undefined>;
   set(session: SessionRecord): Promise<void>;
+  delete(sessionKey: string): Promise<void>;
   touch(sessionKey: string): Promise<SessionRecord | undefined>;
   listByAnchor(anchorKey: string): Promise<SessionRecord[]>;
   listByBootstrapKey(bootstrapKey: string): Promise<SessionRecord[]>;
@@ -91,6 +92,13 @@ export class InMemorySessionStore implements SessionStore {
       this.sessions.set(session.sessionKey, this.normalizeSession(session));
       await this.rebuildIndexesForSession(session.sessionKey);
       await this.pruneToLimits();
+    });
+  }
+
+  async delete(sessionKey: string): Promise<void> {
+    await this.locks.run(sessionKey, async () => {
+      this.sessions.delete(sessionKey);
+      await this.rebuildIndexesForSession(sessionKey);
     });
   }
 
@@ -326,6 +334,20 @@ export class SqliteSessionStore implements SessionStore {
 
   async set(session: SessionRecord): Promise<void> {
     await this.locks.run(session.sessionKey, () => this.persistSession(session));
+  }
+
+  async delete(sessionKey: string): Promise<void> {
+    await this.locks.run(sessionKey, () => {
+      this.db.exec("BEGIN IMMEDIATE TRANSACTION");
+      try {
+        this.db.prepare("DELETE FROM session_context_keys WHERE session_key = ?").run(sessionKey);
+        this.db.prepare("DELETE FROM sessions WHERE session_key = ?").run(sessionKey);
+        this.db.exec("COMMIT");
+      } catch (error) {
+        this.db.exec("ROLLBACK");
+        throw error;
+      }
+    });
   }
 
   async touch(sessionKey: string): Promise<SessionRecord | undefined> {
@@ -622,6 +644,11 @@ export class RedisSessionStore implements SessionStore {
   async set(session: SessionRecord): Promise<void> {
     await this.ready;
     await this.locks.run(session.sessionKey, () => this.persistSession(session));
+  }
+
+  async delete(sessionKey: string): Promise<void> {
+    await this.ready;
+    await this.locks.run(sessionKey, () => this.withMutationLock(() => this.deleteSessionLocked(sessionKey)));
   }
 
   async touch(sessionKey: string): Promise<SessionRecord | undefined> {

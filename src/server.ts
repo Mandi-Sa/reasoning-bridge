@@ -953,6 +953,13 @@ async function start(): Promise<void> {
           anchorKey,
           bootstrapKey: bootstrapKey ?? null
         }, "inferred session produced no repair matches; creating isolated session");
+        if (resolvedBy !== "created" && resolvedBy !== "explicit") {
+          await store.delete(resolvedSession.sessionKey);
+          request.log.warn({
+            sessionKey: resolvedSession.sessionKey,
+            source: resolvedBy
+          }, "poisoned session cache deleted");
+        }
         const isolatedResolved = {
           sessionKey: `${anchorKey}:root`,
           anchorKey,
