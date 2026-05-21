@@ -320,6 +320,17 @@ function isResponsesAssistantItem(value: JsonValue | undefined): boolean {
   return object.type === "message" && object.role === "assistant";
 }
 
+function normalizeResponsesAssistantItem(value: JsonValue): JsonValue {
+  const object = asObject(value);
+  if (!object || object.role !== "assistant" || object.type) {
+    return value;
+  }
+  return {
+    type: "message",
+    ...object
+  } as JsonValue;
+}
+
 function isResponsesReasoningItem(value: JsonValue | undefined): boolean {
   return blockType(value) === "reasoning";
 }
@@ -379,7 +390,7 @@ function buildResponsesProjection(body: JsonObject): ResponsesInternalProjection
     input.forEach((item, itemIndex) => {
       const jsonItem = item as JsonValue;
       if (isResponsesAssistantItem(jsonItem)) {
-        currentItems.push(jsonItem);
+        currentItems.push(normalizeResponsesAssistantItem(jsonItem));
         currentIndexes.push(itemIndex);
         return;
       }
