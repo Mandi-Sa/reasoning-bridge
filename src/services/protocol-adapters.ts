@@ -225,6 +225,7 @@ export function extractAssistantFromAnthropicMessage(payload: unknown): Assistan
 
 export function repairAnthropicMessages(body: JsonObject, session?: SessionRecord): ProtocolRepairResult<JsonObject> {
   const internalBody = anthropicMessagesToInternalRequest(body);
+  const messageIndexOffset = systemContextMessages(body.system as JsonValue | undefined).length;
   const repairResult = repairMessages(internalBody.messages, session);
   const repairedMessages = arrayContent(body.messages as JsonValue | undefined)
     .map((message) => cloneJson(message) as JsonObject);
@@ -235,7 +236,8 @@ export function repairAnthropicMessages(body: JsonObject, session?: SessionRecor
       continue;
     }
     const turn = turnsById.get(match.turnId);
-    const message = repairedMessages[match.messageIndex];
+    const originalMessageIndex = match.messageIndex - messageIndexOffset;
+    const message = originalMessageIndex >= 0 ? repairedMessages[originalMessageIndex] : undefined;
     if (!turn || !message) {
       continue;
     }
@@ -270,7 +272,11 @@ export function repairAnthropicMessages(body: JsonObject, session?: SessionRecor
       missingAssistantIndexes: repairedInternalBody.messages
         .map((message, index) => ({ message, index }))
         .filter((item) => item.message.role === "assistant" && !item.message.reasoning_content)
-        .map((item) => item.index)
+        .map((item) => item.index - messageIndexOffset)
+        .filter((index) => index >= 0),
+      repairedAssistantIndexes: repairResult.repairedAssistantIndexes
+        .map((index) => index - messageIndexOffset)
+        .filter((index) => index >= 0)
     }
   };
 }
