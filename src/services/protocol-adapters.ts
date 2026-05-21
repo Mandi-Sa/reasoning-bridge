@@ -62,6 +62,13 @@ function blockType(value: JsonValue | undefined): string | undefined {
   return typeof object?.type === "string" ? object.type : undefined;
 }
 
+function systemContextMessages(value: JsonValue | undefined): ChatMessage[] {
+  if (value === undefined || value === null) {
+    return [];
+  }
+  return [{ role: "system", content: value }];
+}
+
 function isReasoningBlock(value: JsonValue | undefined): boolean {
   const type = blockType(value);
   return type === "thinking" || type === "reasoning";
@@ -161,13 +168,16 @@ export function anthropicMessagesToInternalRequest(body: JsonObject): ChatComple
   const request: ChatCompletionRequest = {
     ...body,
     model: typeof body.model === "string" ? body.model : "",
-    messages: messages
-      .map((item) => asObject(item))
-      .filter((item): item is Record<string, unknown> => Boolean(item))
-      .map((item) => {
-        const message = item as unknown as ChatMessage;
-        return message.role === "assistant" ? fromAnthropicAssistantMessage(message) : message;
-      })
+    messages: [
+      ...systemContextMessages(body.system as JsonValue | undefined),
+      ...messages
+        .map((item) => asObject(item))
+        .filter((item): item is Record<string, unknown> => Boolean(item))
+        .map((item) => {
+          const message = item as unknown as ChatMessage;
+          return message.role === "assistant" ? fromAnthropicAssistantMessage(message) : message;
+        })
+    ]
   };
   if (typeof body.stream === "boolean") {
     request.stream = body.stream;
@@ -295,6 +305,9 @@ function isResponsesAssistantItem(value: JsonValue | undefined): boolean {
   if (!object) {
     return false;
   }
+  if (object.role === "assistant") {
+    return true;
+  }
   if (object.type === "function_call" || object.type === "reasoning") {
     return true;
   }
@@ -306,7 +319,9 @@ function isResponsesReasoningItem(value: JsonValue | undefined): boolean {
 }
 
 function buildResponsesProjection(body: JsonObject): ResponsesInternalProjection {
-  const messages: ChatMessage[] = [];
+  const messages: ChatMessage[] = [
+    ...systemContextMessages(body.instructions as JsonValue | undefined)
+  ];
   const groups: ResponsesAssistantGroup[] = [];
   const input = body.input;
 
