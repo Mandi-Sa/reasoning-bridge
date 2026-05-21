@@ -13,6 +13,17 @@ import {
   isStreamAssemblyComplete
 } from "./services/reasoning-extractor.js";
 import {
+  anthropicMessagesToInternalRequest,
+  consumeAnthropicSseEvent,
+  consumeResponsesSseEvent,
+  createProtocolStreamAssemblerState,
+  extractAssistantFromAnthropicMessage,
+  extractAssistantFromResponses,
+  repairAnthropicMessages,
+  repairResponsesInput,
+  responsesToInternalRequest
+} from "./services/protocol-adapters.js";
+import {
   buildAnchorKey,
   buildBootstrapKey,
   buildDownstreamNamespace,
@@ -308,6 +319,15 @@ async function forwardToUpstreamWithHeaders(
   requestHeaders: Record<string, string | string[] | undefined>,
   requestIp: string
 ): Promise<UpstreamResponseHandle> {
+  return forwardToUpstreamPathWithHeaders(config.upstreamPath, body, requestHeaders, requestIp);
+}
+
+async function forwardToUpstreamPathWithHeaders(
+  upstreamPath: string,
+  body: JsonObject,
+  requestHeaders: Record<string, string | string[] | undefined>,
+  requestIp: string
+): Promise<UpstreamResponseHandle> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), config.requestTimeoutMs);
   let cleaned = false;
@@ -320,7 +340,7 @@ async function forwardToUpstreamWithHeaders(
   };
 
   try {
-    const response = await fetch(`${config.upstreamBaseUrl}${config.upstreamPath}`, {
+    const response = await fetch(`${config.upstreamBaseUrl}${upstreamPath}`, {
       method: "POST",
       headers: buildForwardHeaders(requestHeaders, requestIp, config.upstreamApiKey),
       body: JSON.stringify(body),
@@ -595,6 +615,589 @@ function handleUnrepairedThinkingMode(
   return body;
 }
 
+type StatefulResolutionSource = "explicit" | "bootstrap" | "context-key" | "recent-fallback" | "cross-namespace-fallback" | "created";
+
+interface ProtocolRepairOutcome {
+  internalBody: ChatCompletionRequest;
+  repairedBody: JsonObject;
+  repairResult: ReturnType<typeof repairMessages>;
+}
+
+interface StatefulProtocolAdapter {
+  name: "anthropic-messages" | "openai-responses";
+  upstreamPath: string;
+  validateBody: (body: JsonObject) => string | undefined;
+  toInternalRequest: (body: JsonObject) => ChatCompletionRequest;
+  repairBody: (body: JsonObject, session?: SessionRecord) => ProtocolRepairOutcome;
+  extractAssistant: (payload: unknown) => AssistantMessageSnapshot | undefined;
+  consumeStreamEvent: ReturnType<typeof createProtocolStreamAssemblerState> extends infer TState
+    ? (state: TState, data: string) => void
+    : never;
+  canDisableThinking: (body: JsonObject) => boolean;
+  disableThinking: (body: JsonObject) => JsonObject;
+}
+
+function requestPathWithSearch(requestUrl: string, upstreamPath: string): string {
+  const queryStart = requestUrl.indexOf("?");
+  return queryStart >= 0 ? `${upstreamPath}${requestUrl.slice(queryStart)}` : upstreamPath;
+}
+
+function isJsonObject(value: unknown): value is JsonObject {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function validateAnthropicMessagesBody(body: JsonObject): string | undefined {
+  if (typeof body.model !== "string" || !Array.isArray(body.messages)) {
+    return "Expected Anthropic-style messages body with model and messages";
+  }
+  return undefined;
+}
+
+function validateResponsesBody(body: JsonObject): string | undefined {
+  if (typeof body.model !== "string" || body.input === undefined) {
+    return "Expected OpenAI Responses-style body with model and input";
+  }
+  return undefined;
+}
+
+function canDisableAnthropicThinking(body: JsonObject): boolean {
+  return isJsonObject(body.thinking) || config.forceInjectReasoningEffortNone;
+}
+
+function disableAnthropicThinking(body: JsonObject): JsonObject {
+  const nextBody = { ...body };
+  delete nextBody.thinking;
+  if (config.forceInjectReasoningEffortNone) {
+    nextBody.thinking = { type: "disabled" };
+  }
+  return nextBody;
+}
+
+function canDisableResponsesThinking(body: JsonObject): boolean {
+  return isJsonObject(body.reasoning) || typeof body.reasoning_effort === "string" || config.forceInjectReasoningEffortNone;
+}
+
+function disableResponsesThinking(body: JsonObject): JsonObject {
+  const nextBody = { ...body };
+  delete nextBody.reasoning;
+  delete nextBody.reasoning_effort;
+  if (config.forceInjectReasoningEffortNone) {
+    nextBody.reasoning = { effort: "none" };
+  }
+  return nextBody;
+}
+
+function handleProtocolLowConfidence(
+  reply: FastifyReply,
+  body: JsonObject,
+  internalBody: ChatCompletionRequest,
+  adapter: StatefulProtocolAdapter,
+  resolvedBy: StatefulResolutionSource,
+  bestCandidate: SessionMatchCandidate | undefined
+): JsonObject | undefined {
+  if (resolvedBy === "explicit" || !isRecentFallbackEligible(internalBody)) {
+    return body;
+  }
+
+  if (isConfidentSessionCandidate(bestCandidate)) {
+    return body;
+  }
+
+  appendWarning(reply, buildLowConfidenceWarning(bestCandidate, resolvedBy));
+
+  if (config.lowConfidenceStrategy === "reject") {
+    reply.code(409).send({
+      error: {
+        code: "low_confidence_session_match",
+        message: `Bridge could not safely recover the prior assistant reasoning state for ${adapter.name}.`
+      }
+    });
+    return undefined;
+  }
+
+  if (config.lowConfidenceStrategy === "disable-thinking") {
+    if (adapter.canDisableThinking(body)) {
+      appendWarning(reply, "thinking-disabled-by-bridge");
+      return adapter.disableThinking(body);
+    }
+
+    reply.code(409).send({
+      error: {
+        code: "low_confidence_reasoning_repair_required",
+        message: `Bridge could not safely recover prior reasoning state for ${adapter.name}, and this request does not expose a supported thinking toggle to disable before forwarding.`
+      }
+    });
+    return undefined;
+  }
+
+  return body;
+}
+
+function handleProtocolUnrepairedThinking(
+  reply: FastifyReply,
+  body: JsonObject,
+  adapter: StatefulProtocolAdapter,
+  missingAssistantIndexes: number[]
+): JsonObject | undefined {
+  if (!missingAssistantIndexes.length) {
+    return body;
+  }
+
+  appendWarning(reply, `unrepaired-reasoning-for-assistant-indexes:${missingAssistantIndexes.join(",")}`);
+
+  if (config.lowConfidenceStrategy === "reject") {
+    reply.code(409).send({
+      error: {
+        code: "unrepaired_reasoning_content",
+        message: `Bridge could not repair all assistant reasoning state required by ${adapter.name}.`
+      }
+    });
+    return undefined;
+  }
+
+  if (config.lowConfidenceStrategy === "disable-thinking") {
+    if (adapter.canDisableThinking(body)) {
+      appendWarning(reply, "thinking-disabled-after-repair");
+      return adapter.disableThinking(body);
+    }
+
+    reply.code(409).send({
+      error: {
+        code: "unrepaired_reasoning_content",
+        message: `Bridge could not repair all assistant reasoning state for ${adapter.name}, and this request does not expose a supported thinking toggle to disable before forwarding.`
+      }
+    });
+    return undefined;
+  }
+
+  appendWarning(reply, "unrepaired-reasoning-forwarded");
+  return body;
+}
+
+async function handleStatefulProtocolRequest(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  adapter: StatefulProtocolAdapter,
+  store: Awaited<ReturnType<typeof createSessionStore>>
+): Promise<void> {
+  const body = request.body;
+  if (!isJsonObject(body)) {
+    reply.code(400).send({
+      error: {
+        code: "bad_request",
+        message: "Expected JSON object request body"
+      }
+    });
+    return;
+  }
+
+  const validationError = adapter.validateBody(body);
+  if (validationError) {
+    reply.code(400).send({
+      error: {
+        code: "bad_request",
+        message: validationError
+      }
+    });
+    return;
+  }
+
+  const stream = Boolean(body.stream);
+  metrics.beginRequest(stream);
+  let outcome: "success" | "failure" = "failure";
+  let requestClosed = false;
+  const closeRequest = (nextOutcome: "success" | "failure"): void => {
+    if (requestClosed) {
+      return;
+    }
+    requestClosed = true;
+    metrics.endRequest(stream, nextOutcome);
+  };
+
+  try {
+    const downstreamNamespace = buildDownstreamNamespace(request.headers, request.ip, {
+      namespaceIncludeAuthorization: config.namespaceIncludeAuthorization,
+      namespaceIncludeUserAgent: config.namespaceIncludeUserAgent,
+      namespaceIncludeIp: config.namespaceIncludeIp
+    });
+    let workingBody = body;
+    let internalBody = adapter.toInternalRequest(workingBody);
+    const rawAnchorKey = buildAnchorKey(internalBody);
+    const rawBootstrapKey = buildBootstrapKey(internalBody);
+    const anchorKey = qualifyKey(downstreamNamespace.namespaceKey, rawAnchorKey);
+    const bootstrapKey = rawBootstrapKey ? qualifyKey(downstreamNamespace.namespaceKey, rawBootstrapKey) : undefined;
+    const explicit = resolveExplicitSessionKey(
+      { body: internalBody, headers: request.headers },
+      { allowUserScopedSessions: config.allowUserScopedSessions }
+    );
+    let resolved = explicit ? {
+      ...explicit,
+      sessionKey: qualifyKey(downstreamNamespace.namespaceKey, explicit.sessionKey),
+      anchorKey: qualifyKey(downstreamNamespace.namespaceKey, explicit.anchorKey)
+    } : undefined;
+    let resolvedBy: StatefulResolutionSource = explicit ? "explicit" : "created";
+    let contextSessions: SessionRecord[] = [];
+    let bootstrapSessions: SessionRecord[] = [];
+    let bestCandidate: SessionMatchCandidate | undefined;
+    let provisionalCandidate: SessionMatchCandidate | undefined;
+
+    if (!resolved) {
+      contextSessions = await store.listByAnchor(anchorKey);
+      bootstrapSessions = bootstrapKey ? await store.listByBootstrapKey(bootstrapKey) : [];
+
+      provisionalCandidate =
+        findBestSessionCandidate({ body: internalBody, headers: request.headers }, bootstrapSessions, "bootstrap", true) ??
+        findBestSessionCandidate({ body: internalBody, headers: request.headers }, contextSessions, "context-key", true);
+    }
+
+    if (!resolved && provisionalCandidate && isConfidentSessionCandidate(provisionalCandidate)) {
+      resolved = {
+        sessionKey: provisionalCandidate.sessionKey,
+        anchorKey: provisionalCandidate.anchorKey,
+        source: provisionalCandidate.source
+      };
+      resolvedBy = provisionalCandidate.source;
+      bestCandidate = provisionalCandidate;
+    } else if (!bestCandidate && provisionalCandidate) {
+      bestCandidate = provisionalCandidate;
+    }
+
+    if (!resolved && isRecentFallbackEligible(internalBody)) {
+      const recentSessions = (await store.listRecent(config.recentFallbackLimit))
+        .filter((session) => session.sessionKey.startsWith(`${downstreamNamespace.namespaceKey}:`));
+
+      const recentFallback = findBestSessionCandidate(
+        { body: internalBody, headers: request.headers },
+        recentSessions,
+        "recent-fallback"
+      );
+      if (recentFallback) {
+        bestCandidate = recentFallback;
+        if (recentFallback.score >= config.recentFallbackMinScore) {
+          resolved = {
+            sessionKey: recentFallback.sessionKey,
+            anchorKey: recentFallback.anchorKey,
+            source: recentFallback.source
+          };
+          resolvedBy = recentFallback.source;
+        }
+      }
+    }
+
+    if (!resolved && config.allowCrossNamespaceRecovery && isRecentFallbackEligible(internalBody)) {
+      const allRecentSessions = await store.listRecent(config.recentFallbackLimit);
+      const crossNamespaceSessions = allRecentSessions.filter((session) =>
+        !session.sessionKey.startsWith(`${downstreamNamespace.namespaceKey}:`)
+      );
+      const crossNamespaceFallback = findBestSessionCandidate(
+        { body: internalBody, headers: request.headers },
+        crossNamespaceSessions,
+        "cross-namespace-fallback"
+      );
+      if (crossNamespaceFallback) {
+        bestCandidate = crossNamespaceFallback;
+        if (
+          crossNamespaceFallback.score >= config.crossNamespaceMinScore &&
+          (crossNamespaceFallback.candidateCount <= 1 || crossNamespaceFallback.scoreGap >= config.crossNamespaceMinMargin)
+        ) {
+          resolved = {
+            sessionKey: crossNamespaceFallback.sessionKey,
+            anchorKey: crossNamespaceFallback.anchorKey,
+            source: crossNamespaceFallback.source
+          };
+          resolvedBy = crossNamespaceFallback.source;
+        }
+      }
+    }
+
+    if (!resolved) {
+      resolved = {
+        sessionKey: `${anchorKey}:root`,
+        anchorKey,
+        source: "context-key"
+      };
+      resolvedBy = "created";
+    }
+
+    let session = resolvedBy === "created" ? undefined : await store.get(resolved.sessionKey);
+    let repairOutcome = adapter.repairBody(workingBody, session);
+
+    if (
+      shouldIsolateMismatchedInferredSession(
+        internalBody,
+        resolvedBy,
+        repairOutcome.repairResult.matches.length,
+        repairOutcome.repairResult.repairedAssistantIndexes.length,
+        repairOutcome.repairResult.missingAssistantIndexes.length
+      )
+    ) {
+      request.log.warn({
+        protocol: adapter.name,
+        sessionKey: resolved.sessionKey,
+        source: resolvedBy,
+        anchorKey,
+        bootstrapKey: bootstrapKey ?? null
+      }, "inferred session produced no repair matches; creating isolated session");
+      if (resolvedBy !== "created" && resolvedBy !== "explicit") {
+        await store.delete(resolved.sessionKey);
+        request.log.warn({
+          protocol: adapter.name,
+          sessionKey: resolved.sessionKey,
+          source: resolvedBy
+        }, "poisoned session cache deleted");
+      }
+      resolved = {
+        sessionKey: `${anchorKey}:root`,
+        anchorKey,
+        source: "context-key"
+      };
+      resolvedBy = "created";
+      session = undefined;
+      repairOutcome = adapter.repairBody(workingBody, undefined);
+    }
+
+    const maybeAdjustedBody = handleProtocolLowConfidence(reply, workingBody, internalBody, adapter, resolvedBy, bestCandidate);
+    if (!maybeAdjustedBody) {
+      metrics.recordLowConfidence("reject");
+      closeRequest("failure");
+      return;
+    }
+    if (maybeAdjustedBody !== workingBody) {
+      metrics.recordLowConfidence("disable-thinking");
+      workingBody = maybeAdjustedBody;
+      internalBody = adapter.toInternalRequest(workingBody);
+      repairOutcome = adapter.repairBody(workingBody, session);
+    } else if (resolvedBy !== "explicit" && isConfidentSessionCandidate(bestCandidate)) {
+      metrics.recordLowConfidence("allowed");
+    } else if (resolvedBy !== "explicit" && isRecentFallbackEligible(internalBody)) {
+      metrics.recordLowConfidence("warn");
+    }
+    metrics.recordResolution(resolvedBy);
+
+    const shouldAttachRequestContext = shouldAttachRequestContextToSession(
+      resolvedBy,
+      resolved.anchorKey,
+      anchorKey,
+      repairOutcome.repairResult.matches.length
+    );
+
+    session = await ensureSession(resolved.sessionKey, resolved.anchorKey, bootstrapKey, internalBody.model, store);
+    if (shouldAttachRequestContext && resolvedBy !== "created") {
+      await store.addContextKey(session.sessionKey, anchorKey);
+    }
+    if (shouldAttachRequestContext && bootstrapKey && resolvedBy !== "created") {
+      await store.setBootstrapKey(session.sessionKey, bootstrapKey);
+    }
+
+    let repairedBody = repairOutcome.repairedBody;
+    const eligibleAssistantMessages = countEligibleAssistantMessages(internalBody.messages);
+    const repairedAssistantMessages = repairOutcome.repairResult.repairedAssistantIndexes.length;
+    let finalMissingAssistantIndexes = repairOutcome.repairResult.missingAssistantIndexes;
+    metrics.recordRepair(eligibleAssistantMessages, repairedAssistantMessages, finalMissingAssistantIndexes.length);
+
+    const maybeFinalBody = handleProtocolUnrepairedThinking(reply, repairedBody, adapter, finalMissingAssistantIndexes);
+    if (!maybeFinalBody) {
+      metrics.recordLowConfidence("reject");
+      closeRequest("failure");
+      return;
+    }
+    if (maybeFinalBody !== repairedBody) {
+      metrics.recordLowConfidence("disable-thinking");
+      repairedBody = maybeFinalBody;
+      repairOutcome = adapter.repairBody(repairedBody, session);
+      finalMissingAssistantIndexes = repairOutcome.repairResult.missingAssistantIndexes;
+    }
+
+    const requestHash = sha256(canonicalJson({
+      protocol: adapter.name,
+      body: repairedBody
+    }));
+    await store.markInflight(session.sessionKey, {
+      requestHash,
+      startedAt: Date.now(),
+      stream
+    });
+
+    buildWarningHeaders(finalMissingAssistantIndexes, reply);
+
+    request.log.info({
+      protocol: adapter.name,
+      namespaceKey: abbreviateBridgeKey(downstreamNamespace.namespaceKey),
+      sessionKey: abbreviateBridgeKey(session.sessionKey),
+      source: resolved.source,
+      anchorKey: abbreviateBridgeKey(anchorKey),
+      bootstrapKey: abbreviateBridgeKey(bootstrapKey),
+      contextCandidateSessions: contextSessions.length,
+      bootstrapCandidateSessions: bootstrapSessions.length,
+      bestCandidateScore: bestCandidate?.score ?? 0,
+      bestCandidateSecondScore: bestCandidate?.secondBestScore ?? 0,
+      bestCandidateScoreGap: bestCandidate?.scoreGap ?? 0,
+      bestCandidateMatchedTurns: bestCandidate?.matchedTurns ?? 0,
+      bestCandidateCount: bestCandidate?.candidateCount ?? 0,
+      lowConfidenceStrategy: config.lowConfidenceStrategy,
+      stream,
+      matchCount: repairOutcome.repairResult.matches.length,
+      repairedAssistantIndexes: formatIndexList(repairOutcome.repairResult.repairedAssistantIndexes),
+      missingAssistantIndexes: formatIndexList(finalMissingAssistantIndexes)
+    }, `repair protocol=${adapter.name} source=${resolved.source} score=${bestCandidate?.score ?? 0} matched=${repairOutcome.repairResult.matches.length} repaired=${repairOutcome.repairResult.repairedAssistantIndexes.length} missing=${finalMissingAssistantIndexes.length} session=${abbreviateBridgeKey(session.sessionKey)}`);
+
+    if (config.logBody) {
+      request.log.info({
+        protocol: adapter.name,
+        originalBody: body,
+        repairedBody
+      }, "request body details");
+    }
+
+    let upstreamHandle: UpstreamResponseHandle;
+    try {
+      upstreamHandle = await forwardToUpstreamPathWithHeaders(
+        requestPathWithSearch(request.url, adapter.upstreamPath),
+        repairedBody,
+        request.headers,
+        request.ip
+      );
+    } catch (error) {
+      await sendUpstreamReadError(reply, error, session.sessionKey, requestHash, store, closeRequest);
+      return;
+    }
+    const { response: upstream, cleanup: cleanupUpstream } = upstreamHandle;
+
+    copyUpstreamHeaders(upstream, reply);
+    metrics.recordUpstreamStatus(upstream.status);
+    reply.header("x-reasoning-bridge-protocol", adapter.name);
+    reply.header("x-reasoning-bridge-session-key", session.sessionKey);
+    reply.header("x-reasoning-bridge-session-source", resolved.source);
+    reply.header("x-reasoning-bridge-anchor-key", anchorKey);
+    if (bootstrapKey) {
+      reply.header("x-reasoning-bridge-bootstrap-key", bootstrapKey);
+    }
+    reply.header("x-reasoning-bridge-namespace-key", downstreamNamespace.namespaceKey);
+    reply.header("x-reasoning-bridge-match-score", String(bestCandidate?.score ?? 0));
+    reply.header("x-reasoning-bridge-request-model", internalBody.model);
+
+    if (!upstream.ok) {
+      let errorBody: string;
+      try {
+        errorBody = await upstream.text();
+      } catch (error) {
+        cleanupUpstream();
+        await sendUpstreamReadError(reply, error, session.sessionKey, requestHash, store, closeRequest);
+        return;
+      }
+      cleanupUpstream();
+      await store.clearInflight(session.sessionKey, requestHash);
+      closeRequest("failure");
+      reply.code(upstream.status).send({
+        error: {
+          code: "upstream_error",
+          message: summarizeErrorBody(upstream.status, errorBody),
+          upstream_status: upstream.status,
+          upstream_body: errorBody
+        }
+      });
+      return;
+    }
+
+    if (stream) {
+      reply.hijack();
+      const assembler = createProtocolStreamAssemblerState();
+
+      try {
+        await proxyStream(reply, upstream, (data) => adapter.consumeStreamEvent(assembler, data));
+        cleanupUpstream();
+        if (!assembler.done) {
+          request.log.warn({
+            protocol: adapter.name,
+            sessionKey: session.sessionKey,
+            requestHash,
+            responseId: assembler.responseId
+          }, "stream ended without terminal event");
+          metrics.recordStreamInterruption();
+        }
+        if (assembler.assistantMessage) {
+          await saveAssistantTurn(
+            session.sessionKey,
+            requestHash,
+            assembler.responseId,
+            repairOutcome.internalBody.messages,
+            assembler.assistantMessage,
+            store
+          );
+        }
+        outcome = assembler.done ? "success" : "failure";
+      } catch (error) {
+        cleanupUpstream();
+        request.log.error({ err: error, protocol: adapter.name }, "stream proxy failed");
+        if (isAbortError(error)) {
+          metrics.recordUpstreamTimeout();
+        }
+        metrics.recordStreamInterruption();
+        if (!reply.raw.destroyed && !reply.raw.writableEnded) {
+          reply.raw.end();
+        }
+      } finally {
+        await store.clearInflight(session.sessionKey, requestHash);
+        closeRequest(outcome);
+      }
+      return;
+    }
+
+    let rawText: string;
+    try {
+      rawText = await upstream.text();
+    } catch (error) {
+      cleanupUpstream();
+      await sendUpstreamReadError(reply, error, session.sessionKey, requestHash, store, closeRequest);
+      return;
+    }
+    cleanupUpstream();
+    await store.clearInflight(session.sessionKey, requestHash);
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rawText);
+    } catch {
+      outcome = "success";
+      closeRequest(outcome);
+      reply.type(upstream.headers.get("content-type") ?? "application/json").send(rawText);
+      return;
+    }
+
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      !Array.isArray(parsed) &&
+      typeof (parsed as { model?: unknown }).model !== "string"
+    ) {
+      (parsed as { model?: string }).model = internalBody.model;
+    }
+
+    const assistantMessage = adapter.extractAssistant(parsed);
+    if (assistantMessage) {
+      await saveAssistantTurn(
+        session.sessionKey,
+        requestHash,
+        typeof (parsed as { id?: unknown }).id === "string" ? (parsed as { id: string }).id : undefined,
+        repairOutcome.internalBody.messages,
+        assistantMessage,
+        store
+      );
+    }
+
+    outcome = "success";
+    closeRequest(outcome);
+
+    reply
+      .code(upstream.status)
+      .type(upstream.headers.get("content-type") ?? "application/json")
+      .send(parsed);
+  } catch (error) {
+    closeRequest("failure");
+    throw error;
+  }
+}
+
 app.setErrorHandler((error, request, reply) => {
   const message = error instanceof Error ? error.message : "unknown error";
   request.log.error({ err: error }, "unhandled bridge error");
@@ -726,6 +1329,38 @@ async function start(): Promise<void> {
       .code(upstream.status)
       .type(upstream.headers.get("content-type") ?? "application/json")
       .send(rawText);
+  });
+
+  const anthropicMessagesAdapter: StatefulProtocolAdapter = {
+    name: "anthropic-messages",
+    upstreamPath: "/v1/messages",
+    validateBody: validateAnthropicMessagesBody,
+    toInternalRequest: anthropicMessagesToInternalRequest,
+    repairBody: repairAnthropicMessages,
+    extractAssistant: extractAssistantFromAnthropicMessage,
+    consumeStreamEvent: consumeAnthropicSseEvent,
+    canDisableThinking: canDisableAnthropicThinking,
+    disableThinking: disableAnthropicThinking
+  };
+
+  const responsesAdapter: StatefulProtocolAdapter = {
+    name: "openai-responses",
+    upstreamPath: "/v1/responses",
+    validateBody: validateResponsesBody,
+    toInternalRequest: responsesToInternalRequest,
+    repairBody: repairResponsesInput,
+    extractAssistant: extractAssistantFromResponses,
+    consumeStreamEvent: consumeResponsesSseEvent,
+    canDisableThinking: canDisableResponsesThinking,
+    disableThinking: disableResponsesThinking
+  };
+
+  app.post("/v1/messages", async (request: FastifyRequest, reply: FastifyReply) => {
+    await handleStatefulProtocolRequest(request, reply, anthropicMessagesAdapter, store);
+  });
+
+  app.post("/v1/responses", async (request: FastifyRequest, reply: FastifyReply) => {
+    await handleStatefulProtocolRequest(request, reply, responsesAdapter, store);
   });
 
   app.post("/v1/chat/completions", async (request: FastifyRequest, reply: FastifyReply) => {
