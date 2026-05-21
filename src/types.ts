@@ -126,6 +126,9 @@ export interface StreamAssemblerState {
 export interface ProtocolStreamAssemblerState {
   responseId: string | undefined;
   assistantMessage: AssistantMessageSnapshot | undefined;
+  anthropicBlocks: Map<number, JsonObject>;
+  anthropicJsonDeltas: Map<number, string>;
+  responsesItems: Map<number, JsonObject>;
   done: boolean;
 }
 

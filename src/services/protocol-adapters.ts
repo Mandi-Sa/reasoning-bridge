@@ -495,13 +495,47 @@ export function createProtocolStreamAssemblerState(): ProtocolStreamAssemblerSta
   return {
     responseId: undefined,
     assistantMessage: undefined,
+    anthropicBlocks: new Map<number, JsonObject>(),
+    anthropicJsonDeltas: new Map<number, string>(),
+    responsesItems: new Map<number, JsonObject>(),
     done: false
   };
+}
+
+function setAnthropicBlockText(block: JsonObject, key: "text" | "thinking" | "signature", value: unknown): void {
+  if (typeof value !== "string") {
+    return;
+  }
+  block[key] = `${typeof block[key] === "string" ? block[key] : ""}${value}`;
+}
+
+function finalizeAnthropicAssistantFromBlocks(state: ProtocolStreamAssemblerState): void {
+  const content = [...state.anthropicBlocks.entries()]
+    .sort((left, right) => left[0] - right[0])
+    .map(([index, block]) => {
+      const nextBlock = cloneJson(block) as JsonObject;
+      const partialJson = state.anthropicJsonDeltas.get(index);
+      if (partialJson) {
+        try {
+          nextBlock.input = JSON.parse(partialJson) as JsonValue;
+        } catch {
+          nextBlock.input = partialJson;
+        }
+      }
+      return nextBlock as JsonValue;
+    });
+  if (content.length) {
+    state.assistantMessage = extractAssistantFromAnthropicMessage({
+      role: "assistant",
+      content
+    });
+  }
 }
 
 export function consumeAnthropicSseEvent(state: ProtocolStreamAssemblerState, data: string): void {
   if (!data || data === "[DONE]") {
     state.done = true;
+    finalizeAnthropicAssistantFromBlocks(state);
     return;
   }
   let parsed: Record<string, unknown>;
@@ -516,8 +550,37 @@ export function consumeAnthropicSseEvent(state: ProtocolStreamAssemblerState, da
       state.responseId = message.id;
     }
   }
+  if (parsed.type === "content_block_start") {
+    const index = typeof parsed.index === "number" ? parsed.index : 0;
+    const contentBlock = asObject(parsed.content_block);
+    if (contentBlock) {
+      state.anthropicBlocks.set(index, cloneJson(contentBlock as JsonObject) as JsonObject);
+    }
+  }
+  if (parsed.type === "content_block_delta") {
+    const index = typeof parsed.index === "number" ? parsed.index : 0;
+    const delta = asObject(parsed.delta);
+    const block = state.anthropicBlocks.get(index) ?? {};
+    state.anthropicBlocks.set(index, block);
+    if (delta?.type === "text_delta") {
+      setAnthropicBlockText(block, "text", delta.text);
+    }
+    if (delta?.type === "thinking_delta") {
+      setAnthropicBlockText(block, "thinking", delta.thinking);
+    }
+    if (delta?.type === "signature_delta") {
+      setAnthropicBlockText(block, "signature", delta.signature);
+    }
+    if (delta?.type === "input_json_delta" && typeof delta.partial_json === "string") {
+      state.anthropicJsonDeltas.set(index, `${state.anthropicJsonDeltas.get(index) ?? ""}${delta.partial_json}`);
+    }
+  }
+  if (parsed.type === "content_block_stop") {
+    finalizeAnthropicAssistantFromBlocks(state);
+  }
   if (parsed.type === "message_stop") {
     state.done = true;
+    finalizeAnthropicAssistantFromBlocks(state);
   }
   if (parsed.type === "message_delta" && typeof asObject(parsed.delta)?.stop_reason === "string") {
     state.done = true;
@@ -527,9 +590,19 @@ export function consumeAnthropicSseEvent(state: ProtocolStreamAssemblerState, da
   }
 }
 
+function finalizeResponsesAssistantFromItems(state: ProtocolStreamAssemblerState): void {
+  const output = [...state.responsesItems.entries()]
+    .sort((left, right) => left[0] - right[0])
+    .map(([, item]) => cloneJson(item) as JsonValue);
+  if (output.length) {
+    state.assistantMessage = extractAssistantFromResponses({ output });
+  }
+}
+
 export function consumeResponsesSseEvent(state: ProtocolStreamAssemblerState, data: string): void {
   if (!data || data === "[DONE]") {
     state.done = true;
+    finalizeResponsesAssistantFromItems(state);
     return;
   }
   let parsed: Record<string, unknown>;
@@ -540,6 +613,12 @@ export function consumeResponsesSseEvent(state: ProtocolStreamAssemblerState, da
   }
   if (typeof parsed.response_id === "string") {
     state.responseId = parsed.response_id;
+  }
+  const outputIndex = typeof parsed.output_index === "number" ? parsed.output_index : undefined;
+  const item = asObject(parsed.item);
+  if (outputIndex !== undefined && item) {
+    state.responsesItems.set(outputIndex, cloneJson(item as JsonObject) as JsonObject);
+    finalizeResponsesAssistantFromItems(state);
   }
   const response = asObject(parsed.response);
   if (response) {
@@ -553,5 +632,6 @@ export function consumeResponsesSseEvent(state: ProtocolStreamAssemblerState, da
   }
   if (parsed.type === "response.completed" || parsed.type === "response.failed" || parsed.type === "response.incomplete") {
     state.done = true;
+    finalizeResponsesAssistantFromItems(state);
   }
 }
