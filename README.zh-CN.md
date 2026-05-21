@@ -2,9 +2,9 @@
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
-Reasoning Bridge 是一个面向 OpenAI 风格聊天客户端的兼容代理，用来解决下游客户端在后续轮次中不回传历史 `reasoning_content` 的问题。
+Reasoning Bridge 是一个面向推理模型客户端的兼容代理，用来解决下游客户端在后续轮次中不回传历史推理状态的问题。
 
-它接收下游的 `/v1/chat/completions` 请求，基于本地保存的会话状态修复缺失的 assistant `reasoning_content`，再把修复后的请求转发给支持推理模式的上游 API。
+它接收下游的 `/v1/chat/completions`、`/v1/messages` 和 `/v1/responses` 请求，基于本地保存的会话状态修复缺失的 assistant 推理状态，再把修复后的请求转发给支持推理模式的上游 API。
 
 ## 什么时候会用到
 
@@ -17,6 +17,8 @@ Reasoning Bridge 是一个面向 OpenAI 风格聊天客户端的兼容代理，�
 ## 功能
 
 - 兼容 OpenAI 风格 `/v1/chat/completions`
+- 兼容 Anthropic 风格 `/v1/messages` 的 `thinking` 内容块
+- 兼容 OpenAI Responses 风格 `/v1/responses` 的 reasoning output item
 - 自动修复多轮对话中缺失的 `reasoning_content`
 - 支持包含 `tool_calls` 的 assistant 消息
 - 支持 `stream: true` 流式透传，并旁路组装最终 assistant 响应
@@ -108,7 +110,7 @@ npm start
 - `port`：监听端口
 - `upstreamBaseUrl`：上游基础地址
 - `upstreamApiKey`：上游 Bearer Token
-- `upstreamPath`：上游聊天接口路径
+- `upstreamPath`：`/v1/chat/completions` 使用的上游聊天接口路径。`/v1/messages` 和 `/v1/responses` 会按相同路径名转发到 `upstreamBaseUrl`
 - `requestTimeoutMs`：上游请求超时时间
 - `cleanupIntervalMs`：后台清理周期
 - `logBody`：是否打印请求体日志
@@ -159,6 +161,8 @@ npm start
 - `GET /debug/metrics`
 - `GET /debug/store?limit=10`
 - `POST /v1/chat/completions`
+- `POST /v1/messages`
+- `POST /v1/responses`
 
 各端点返回内容说明：
 
@@ -166,11 +170,14 @@ npm start
 - `GET /debug/status`：最完整的桥接器状态总览，包含配置摘要、运行时指标和会话存储统计。
 - `GET /debug/metrics`：只返回运行时指标，适合单独查看请求量、错误、超时和流中断等统计。
 - `GET /debug/store`：只返回会话存储详情，支持 `1` 到 `100` 的 `limit` 参数，会带上最近会话 key 和存储层统计。
-- `POST /v1/chat/completions`：主代理入口。桥接器会修复请求后转发到上游，并在响应头里附带调试信息。
+- `POST /v1/chat/completions`：OpenAI Chat Completions 代理入口，会修复缺失的 assistant `reasoning_content`。
+- `POST /v1/messages`：Anthropic Messages 代理入口，会修复 `content[]` 中缺失的 assistant `thinking` block，并支持 tool-use 历史。
+- `POST /v1/responses`：OpenAI Responses 代理入口，会修复数组式 `input` 历史中缺失的 reasoning output item。
 
 桥接器附加的诊断响应头：
 
 - `x-reasoning-bridge-session-key`：本次请求最终使用的内部 session key。
+- `x-reasoning-bridge-protocol`：`/v1/messages` 和 `/v1/responses` 会返回，表示本次使用的协议适配器。
 - `x-reasoning-bridge-session-source`：session 的解析来源，例如 `explicit`、`bootstrap`、`context-key`、`recent-fallback`、`created`。
 - `x-reasoning-bridge-anchor-key`：本次请求计算出的 anchor key。
 - `x-reasoning-bridge-bootstrap-key`：如果存在，则返回本次请求对应的 bootstrap key。
@@ -194,6 +201,23 @@ curl "http://127.0.0.1:8787/debug/store?limit=20"
 curl -i http://127.0.0.1:8787/v1/chat/completions \
   -H "content-type: application/json" \
   -d '{"model":"deepseek-reasoner","messages":[{"role":"user","content":"hello"}]}'
+```
+
+Anthropic Messages：
+
+```bash
+curl -i http://127.0.0.1:8787/v1/messages \
+  -H "content-type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{"model":"mimo-v2.5-pro","max_tokens":1024,"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}'
+```
+
+OpenAI Responses：
+
+```bash
+curl -i http://127.0.0.1:8787/v1/responses \
+  -H "content-type: application/json" \
+  -d '{"model":"mimo-v2.5-pro","input":[{"role":"user","content":"hello"}]}'
 ```
 
 ## 数据迁移

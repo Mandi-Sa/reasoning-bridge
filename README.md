@@ -2,9 +2,9 @@
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
-Reasoning Bridge is a compatibility proxy for OpenAI-style chat clients that do not send back historical `reasoning_content` in later turns.
+Reasoning Bridge is a compatibility proxy for clients that do not send back historical reasoning state in later turns.
 
-It accepts downstream `/v1/chat/completions` requests, repairs missing assistant-side `reasoning_content` from locally stored session state, and forwards the repaired request to an upstream reasoning-capable API.
+It accepts downstream `/v1/chat/completions`, `/v1/messages`, and `/v1/responses` requests, repairs missing assistant-side reasoning state from locally stored session state, and forwards the repaired request to an upstream reasoning-capable API.
 
 ## When You Need It
 
@@ -17,6 +17,8 @@ In that setup, Reasoning Bridge reconstructs the missing reasoning payload from 
 ## Features
 
 - OpenAI-style `/v1/chat/completions` compatibility
+- Anthropic-style `/v1/messages` compatibility for `thinking` content blocks
+- OpenAI Responses-style `/v1/responses` compatibility for reasoning output items
 - Multi-turn conversation repair for missing `reasoning_content`
 - Assistant messages with `tool_calls`
 - Streaming (`stream: true`) passthrough with side-channel response assembly
@@ -109,7 +111,7 @@ Key fields:
 - `port`: listen port
 - `upstreamBaseUrl`: upstream base URL
 - `upstreamApiKey`: upstream bearer token
-- `upstreamPath`: upstream chat completion path
+- `upstreamPath`: upstream chat completion path used by `/v1/chat/completions`. `/v1/messages` and `/v1/responses` are forwarded to the same path names on `upstreamBaseUrl`.
 - `requestTimeoutMs`: upstream request timeout
 - `cleanupIntervalMs`: background cleanup interval
 - `logBody`: enable request body logging
@@ -161,6 +163,8 @@ Key fields:
 - `GET /debug/metrics`
 - `GET /debug/store?limit=10`
 - `POST /v1/chat/completions`
+- `POST /v1/messages`
+- `POST /v1/responses`
 
 What each endpoint returns:
 
@@ -168,11 +172,14 @@ What each endpoint returns:
 - `GET /debug/status`: Full bridge overview. Includes config summary, runtime metrics, and session store statistics.
 - `GET /debug/metrics`: Runtime counters only. Useful when you only want request, error, timeout, and stream interruption metrics.
 - `GET /debug/store`: Session store details only. Supports `limit` from `1` to `100` and returns recent session keys with store-level stats.
-- `POST /v1/chat/completions`: Main proxy endpoint. It forwards the repaired request upstream and adds bridge-specific diagnostic headers to the response.
+- `POST /v1/chat/completions`: OpenAI Chat Completions proxy endpoint. It repairs missing assistant `reasoning_content`.
+- `POST /v1/messages`: Anthropic Messages proxy endpoint. It repairs missing assistant `thinking` blocks inside `content[]`, including tool-use histories.
+- `POST /v1/responses`: OpenAI Responses proxy endpoint. It repairs missing reasoning output items in array-style `input` histories.
 
 Bridge diagnostic response headers:
 
 - `x-reasoning-bridge-session-key`: Resolved internal session key used for this request.
+- `x-reasoning-bridge-protocol`: Present on `/v1/messages` and `/v1/responses`; identifies the protocol adapter used by the bridge.
 - `x-reasoning-bridge-session-source`: How the session was resolved, such as `explicit`, `bootstrap`, `context-key`, `recent-fallback`, or `created`.
 - `x-reasoning-bridge-anchor-key`: The computed anchor key for the request.
 - `x-reasoning-bridge-bootstrap-key`: The computed bootstrap key when available.
@@ -196,6 +203,23 @@ Inspect response headers from the main proxy endpoint:
 curl -i http://127.0.0.1:8787/v1/chat/completions \
   -H "content-type: application/json" \
   -d '{"model":"deepseek-reasoner","messages":[{"role":"user","content":"hello"}]}'
+```
+
+Anthropic Messages:
+
+```bash
+curl -i http://127.0.0.1:8787/v1/messages \
+  -H "content-type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{"model":"mimo-v2.5-pro","max_tokens":1024,"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}'
+```
+
+OpenAI Responses:
+
+```bash
+curl -i http://127.0.0.1:8787/v1/responses \
+  -H "content-type: application/json" \
+  -d '{"model":"mimo-v2.5-pro","input":[{"role":"user","content":"hello"}]}'
 ```
 
 ## Migration
