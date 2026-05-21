@@ -101,7 +101,8 @@ function makeTurnId(sessionKey: string, requestHash: string, assistant: Assistan
       requestHash,
       content: assistant.content,
       tool_calls: assistant.tool_calls,
-      reasoning_content: assistant.reasoning_content
+      reasoning_content: assistant.reasoning_content,
+      reasoning_blocks: assistant.reasoning_blocks
     })
   );
 }

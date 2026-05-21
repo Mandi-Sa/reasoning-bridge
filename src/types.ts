@@ -39,6 +39,7 @@ export interface AssistantMessageSnapshot {
   content: JsonValue | undefined;
   tool_calls: ToolCall[] | undefined;
   reasoning_content: string | undefined;
+  reasoning_blocks?: JsonValue[];
 }
 
 export interface MessageFingerprint {
@@ -119,6 +120,12 @@ export interface StreamAssemblerState {
   reasoningParts: string[];
   toolCalls: Map<number, ToolCall>;
   finishReason: string | undefined;
+  done: boolean;
+}
+
+export interface ProtocolStreamAssemblerState {
+  responseId: string | undefined;
+  assistantMessage: AssistantMessageSnapshot | undefined;
   done: boolean;
 }
 
