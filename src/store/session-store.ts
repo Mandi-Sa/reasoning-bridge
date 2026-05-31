@@ -36,6 +36,31 @@ interface SessionStoreOptions {
   limits: SessionStoreLimits;
 }
 
+function redisReconnectDelay(retries: number): number {
+  return Math.min(1000 + retries * 250, 10_000);
+}
+
+function attachRedisEventHandlers(client: RedisClientType, label: string): void {
+  client.on("error", (error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`[reasoning-bridge] ${label} Redis client error: ${message}`);
+  });
+  client.on("reconnecting", () => {
+    console.warn(`[reasoning-bridge] ${label} Redis client reconnecting`);
+  });
+}
+
+function createBridgeRedisClient(redisUrl: string): RedisClientType {
+  const client = createClient({
+    url: redisUrl,
+    socket: {
+      reconnectStrategy: redisReconnectDelay
+    }
+  }) as RedisClientType;
+  attachRedisEventHandlers(client, "primary");
+  return client;
+}
+
 function summarizeSessions(sessions: SessionRecord[]): Pick<StoreStatsSnapshot, "inflightCount" | "totalTurns" | "sessionsWithBootstrapKey"> {
   return sessions.reduce((totals, session) => ({
     inflightCount: totals.inflightCount + session.inflightRequests.length,
@@ -625,8 +650,9 @@ export class RedisSessionStore implements SessionStore {
   private readonly mutationLock = new SessionMutationLocks();
 
   constructor(redisUrl: string, keyPrefix: string, limits: SessionStoreLimits) {
-    this.client = createClient({ url: redisUrl });
+    this.client = createBridgeRedisClient(redisUrl);
     this.txClient = this.client.duplicate();
+    attachRedisEventHandlers(this.txClient, "transaction");
     this.prefix = keyPrefix;
     this.limits = limits;
     this.ready = Promise.all([
